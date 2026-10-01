@@ -110,25 +110,45 @@ src/Lumina/
 
 ## Authoring
 
-Lumina was written with AI assistance — **Space Bunny**, **Lemonade AI** running
-`Ornith-1.5-35B-Q4_K_M`, and `Qwen3.8-27B-GGUF-UD-Q4_K_XL` — under the
-direction of a human who decided the design, the tuning constants, and every
-call about scope. Being straight about that seemed better than shipping code
-whose provenance people might assume is different.
+Lumina was written with AI coding assistance, directed and reviewed by a human
+who decided the design, the tuning constants, and every call about scope.
+Disclosing that seems better than shipping code whose provenance people might
+assume is different.
+
+**The plugin itself contains no AI and makes no network calls.** It is a Phong
+shading model implemented directly. Nothing is generated at runtime, nothing is
+downloaded, nothing is sent anywhere.
 
 One constraint shaped the whole codebase: **keep the import surface as small as
 possible.**
 
 `color_engine.py`, which does all the actual shading, imports exactly two
-modules — `math` and `typing`. Across the entire plugin the only other imports
-are PyQt5, which Krita already ships, and Krita's own scripting module. There
-is no numpy, no colour-science library, no third-party package of any kind.
+modules — `math` and `typing`, both standard library. The rest of the plugin
+adds only PyQt5, which Krita already ships, and Krita's own scripting module:
+
+| Module | Imports |
+|---|---|
+| `color_engine.py` | `math`, `typing` |
+| `color_processor.py` | `PyQt5`, `typing`, `color_engine`, `math` |
+| `color_controls.py` | `PyQt5`, `typing` |
+| `sphere_widget.py` | `PyQt5`, `logging`, `math`, `os`, `typing` |
+| `sphere_docker.py` | `PyQt5`, `krita`, `logging`, `math`, `os`, `typing`, `weakref` |
+
+Every one of those is either the Python standard library or shipped with Krita.
+There is no numpy, no colour-science library, no third-party package of any
+kind, and nothing to install.
 
 That was not asceticism. It means:
 
 - the plugin cannot break because a dependency shipped a breaking change
 - the whole render can be unit-tested with a bare Python install
 - there is no supply-chain surface beyond Krita itself
+
+If you want to check that for yourself, the whole import surface is one command:
+
+```bash
+grep -rhE '^\s*(import|from)\s' src/Lumina/*.py | sort -u
+```
 
 If you contribute, please keep it that way. It is the plugin's main practical
 advantage over anything built on a shading or colour library.
