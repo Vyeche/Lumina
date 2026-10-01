@@ -105,7 +105,9 @@ src/Lumina/
 
 ## Dependencies
 
-- Krita 5.x (bundles PyQt5 and Python 3.13)
+- **Krita 5.x.** Not Krita 6 — that is the Qt6 build and its Python API is
+  PyQt6, so this PyQt5 plugin will not load there. Porting is the next step.
+  Tested on the Krita flatpak, which bundles PyQt5 and Python 3.13.
 - Nothing else. The shading is pure Python; there is no numpy.
 
 ## Authoring
