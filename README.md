@@ -121,6 +121,13 @@ assume is different.
 shading model implemented directly. Nothing is generated at runtime, nothing is
 downloaded, nothing is sent anywhere.
 
+Development ran through a local harness with [Guard](https://hol.org/guard) in
+the loop. It gates actions before the assistant takes them — destructive shell
+commands, secret access, software installs, data movement — by allowing,
+asking, or blocking, and keeps a record of what happened. It guards the
+machine, not the source: nothing it protects lives in this repository, and the
+plugin ships with none of it.
+
 One constraint shaped the whole codebase: **keep the import surface as small as
 possible.**
 
