@@ -32,3 +32,8 @@ lumina_log.txt
 .opencode/
 .omp/
 .agent/
+
+# Unpublished announcement drafts. Community posts and catalogue entries are
+# written here and posted by hand; a half-finished draft in the public repo
+# could be read out of context or posted by someone else.
+documentation/announcements/
