@@ -162,6 +162,22 @@ explains the module layout and where each decision came from.
 wrong and how it was fixed, which is probably the fastest way to learn the
 traps.
 
+## Support
+
+Lumina is free and MIT licensed, and it will stay that way. If it earns its
+keep for you and you'd like to say so:
+
+**[:heart: Sponsor on GitHub](https://github.com/sponsors/Vyeche)**
+
+Sponsorship goes toward keeping it working against new Krita releases, and
+toward the time that goes into bug reports and feature work from people who
+aren't writing code. It is genuinely optional, and the plugin does not gate
+anything behind it.
+
+If you would rather not sponsor, a star, an issue with a real bug report, or
+telling a colleague about it helps just as much. Those are the things that
+actually change the software.
+
 ## Running the tests
 
 ```bash
