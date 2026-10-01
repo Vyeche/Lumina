@@ -1,3 +1,7 @@
-# These are supported funding model platforms
+# Funding platforms for Lumina.
+#
+# The `github` key takes Sponsors-enabled *usernames*, not profile URLs. A full
+# URL there parses but matches no account, and the "Sponsor this project"
+# panel on the repo renders empty.
 
-github: [https://github.com/sponsors/Vyeche]
+github: [Vyeche]
