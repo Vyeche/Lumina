@@ -110,11 +110,11 @@ src/Lumina/
 
 ## Authoring
 
-Lumina was written with AI assistance — **Space Bunny**, **Lemonade AI**
-running **Ornith 1.5**, and **Qwen 3.8** — under the direction of a human who
-decided the design, the tuning constants, and every call about scope. Being
-straight about that seemed better than shipping code whose provenance people
-might assume is different.
+Lumina was written with AI assistance — **Space Bunny**, **Lemonade AI** running
+`Ornith-1.5-35B-Q4_K_M`, and `Qwen3.8-27B-GGUF-UD-Q4_K_XL` — under the
+direction of a human who decided the design, the tuning constants, and every
+call about scope. Being straight about that seemed better than shipping code
+whose provenance people might assume is different.
 
 One constraint shaped the whole codebase: **keep the import surface as small as
 possible.**
