@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Lumina — Help</title></head>
+<body>
+<h1>Lumina</h1>
+<p>A 3D color sphere for studying how light, shadow and base color interact, and for
+picking colors out of your artwork.</p>
+
+<p><b>The sphere's colors change only from the sliders, the three target dots, or the
+eyedropper. Clicking the sphere does not change the sphere.</b></p>
+
+<h2>The panel</h2>
+<ul>
+<li><b>Header row.</b> <b>Left block</b> holds the original color — click it to revert the
+active color back to it. <b>Right block</b> holds the active color — click it to commit it
+as the new original. The <b>eyedropper</b> hands over to Krita's Color Sampler so you can
+sample any pixel on the canvas.</li>
+<li><b>The orb.</b> A sphere lit by the three target colors. The small ring that follows
+your pointer is the <b>color sampler</b>; its center shows the exact color being sampled
+and the value appears underneath.</li>
+<li><b>Target dots.</b> Pick which color the Hue and Saturation sliders edit —
+<b>moon</b> for shadow, <b>droplet</b> for base, <b>sun</b> for light. The selected dot
+has a light ring around it.</li>
+<li><b>Hue / Saturation / Contrast.</b> Hue and Saturation edit the selected target.
+Contrast controls how sharply the light falls off into shadow; it does not change a color.</li>
+<li><b>Advanced.</b> A collapsible group holding Base Level, Intensity, Ambient, Specular,
+Glow, Tone and the light mixer. The panel scrolls when it does not fit.</li>
+<li><b>Bottom row.</b> <b>Artistic</b> for bright white highlights, <b>Real</b> for warm
+natural ones, and <b>Apply</b> to send the base color to Krita's foreground.</li>
+</ul>
+
+<h2>Picking a color</h2>
+<p>Click or drag on the sphere to choose that color <b>for drawing</b>. This sets Krita's
+foreground (brush) color so you can paint with it; the sphere itself is unchanged. Picks
+only register on the sphere — the corners outside the disc are ignored. Just past the
+silhouette a pick glides around the rim instead of stopping dead, so colors at the very
+edge stay reachable.</p>
+<p>Press the <b>eyedropper</b>, then click a pixel on the canvas, to adopt a color from
+your artwork. The sampled color becomes the base and the rest of the lighting is derived
+around it, so the three always blend. This follows the usual hue-shifting rule: the
+<b>light</b> closes 45% of the distance toward white, desaturates, and moves its hue 35%
+of the way toward the warm key light; the <b>shadow</b> drops to 42% of the base's value,
+mutes slightly, and moves its hue 30% of the way toward the cool ambient — the complement
+of that light. Your previous tool is restored and the eyedropper stays armed.</p>
+
+<h2>Settings (gear)</h2>
+<p>Light azimuth and height rotate and raise the light, <b>Quality</b> sets the render
+resolution, <b>Show color sampler</b> toggles the pointer ring, and <b>Reset all</b>
+restores every default.</p>
+<p><b>Save settings</b> writes your setup to a plain-text file. Changes already save as
+you make them, so this is a checkpoint rather than the only chance to keep your work.
+The three target colors, light direction, quality, sampler visibility and every slider are
+restored next time Krita opens. The color you last picked for painting is not saved.</p>
+
+<h2>Tips</h2>
+<ul>
+<li>Shadows are rarely black. Give the shadow a real color — a cool bounce from the
+environment — rather than letting it go to black.</li>
+<li>The base color is independent of the light and shadow, so you can restyle an object
+without disturbing its lighting.</li>
+<li>Use the left block to A/B: pick a color, edit it, click the left block to go back,
+then the right block to keep the new one.</li>
+<li>Drop Quality to Low on large documents if adjusting a slider feels laggy.</li>
+</ul>
+</body>
+</html>

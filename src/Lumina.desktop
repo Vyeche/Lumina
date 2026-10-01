@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Service
+ServiceTypes=Krita/PythonPlugin
+X-KDE-Library=Lumina
+Name=Lumina
+Comment=Interactive 3D color sphere — study light, ambient and base color on a shaded sphere.
+X-Python-2-Compatible=false
+X-KDE-PluginInfo-Author=Vye Kantor
+X-KDE-PluginInfo-Version=2.0.0
+X-KDE-PluginInfo-Name=Lumina
+X-Krita-Manual=MANUAL.html
