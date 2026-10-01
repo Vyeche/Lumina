@@ -108,6 +108,60 @@ src/Lumina/
 - Krita 5.x (bundles PyQt5 and Python 3.13)
 - Nothing else. The shading is pure Python; there is no numpy.
 
+## Authoring
+
+Lumina was written with AI assistance — **Space Bunny**, **Lemonade AI**
+running **Ornith 1.5**, and **Qwen 3.8** — under the direction of a human who
+decided the design, the tuning constants, and every call about scope. Being
+straight about that seemed better than shipping code whose provenance people
+might assume is different.
+
+One constraint shaped the whole codebase: **keep the import surface as small as
+possible.**
+
+`color_engine.py`, which does all the actual shading, imports exactly two
+modules — `math` and `typing`. Across the entire plugin the only other imports
+are PyQt5, which Krita already ships, and Krita's own scripting module. There
+is no numpy, no colour-science library, no third-party package of any kind.
+
+That was not asceticism. It means:
+
+- the plugin cannot break because a dependency shipped a breaking change
+- the whole render can be unit-tested with a bare Python install
+- there is no supply-chain surface beyond Krita itself
+
+If you contribute, please keep it that way. It is the plugin's main practical
+advantage over anything built on a shading or colour library.
+
+## Contributing
+
+Contributions are genuinely welcome — bug reports, fixes, presets, translations,
+and especially **real artists telling us what is awkward to use**, which is the
+feedback that has changed this plugin the most.
+
+A few things that will make a patch easy to merge:
+
+1. **Open an issue first** for anything larger than a fix, so we can agree on
+   the approach before you spend an evening on it.
+2. **Keep the engine pure.** Changes to `color_engine.py` must not import Qt,
+   Krita, or anything outside the standard library. It is the one file the test
+   suite can run anywhere, and that is worth protecting.
+3. **Run the tests** before opening a pull request:
+
+   ```bash
+   python3 src/Lumina/test_shading_standalone.py   # from the repo root
+   ```
+
+4. **Match the surrounding style** — 4-space indent, docstrings on anything
+   non-obvious, and comments that explain *why* rather than restate the code.
+   There is a fair amount of that in here, and it is deliberate.
+
+If you are new to the codebase, [documentation/ARCHITECTURE.md](documentation/ARCHITECTURE.md)
+explains the module layout and where each decision came from.
+[documentation/Bugs.md](documentation/Bugs.md) records what has already gone
+wrong and how it was fixed, which is probably the fastest way to learn the
+traps.
+
 ## Running the tests
 
 ```bash
