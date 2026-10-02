@@ -247,16 +247,14 @@ TEXT_BRIGHT = QColor(225, 232, 245)
 # The text is TEXT_BRIGHT rather than TEXT_DIM: a tooltip is opt-in help, so
 # it should read at full contrast, and dim text on a mid-grey tooltip is what
 # made these hard to read in the first place.
-TOOLTIP_BG = QColor(31, 34, 41)
 TOOLTIP_STYLE = """
 QToolTip {{
-    background-color: {bg};
-    color: {bright};
+    background-color: #000000;
+    color: #ffffff;
     border: 1px solid {border};
     padding: 4px 6px;
 }}
-""".format(bg=TOOLTIP_BG.name(), bright=TEXT_BRIGHT.name(),
-           border=PANEL_BORDER.name())
+""".format(border=PANEL_BORDER.name())
 
 
 # ---------------------------------------------------------------------------
@@ -703,23 +701,48 @@ class SphereDocker(QDockWidget):
           transparent regardless.
         * A palette set on the docker is likewise ignored, because a tooltip is
           its own top-level window and does not inherit the owner's palette.
+        * Setting the two palette roles on QApplication *did* take -- they read
+          back as #000000/#ffffff -- but the tooltip still rendered with no
+          background. Krita's style paints tooltip windows itself rather than
+          filling from those roles.
 
-        What actually works is the two palette roles the tooltip window really
-        reads: ``ToolTipBase`` and ``ToolTipText``, which live on
-        QApplication's palette. Only those two roles are touched, so Krita's
-        stylesheet and every other colour role are left exactly as they were.
+        What actually works is appending a ``QToolTip`` rule to the
+        application's *existing* stylesheet. Appending, not replacing: an
+        earlier ``setStyleSheet`` call replaced Krita's whole app stylesheet,
+        which is invasive. Reading it first and adding one rule keeps
+        everything Krita set and wins by order -- later rules take precedence
+        at equal specificity. Guarded by a marker comment so a second docker
+        instance does not stack duplicate rules.
 
-        Before this, Krita's theme supplied ToolTipText #9ca2ae on ToolTipBase
-        #363636 -- too close in value to read comfortably, which is what made
-        the labels illegible over the canvas.
+        Timing matters more than the call itself: this runs from __init__,
+        while Krita is still starting up, and Krita re-applies its own theme
+        afterwards, wiping the two roles back to its values. So the style is
+        applied twice -- once now, and once on a short single-shot timer that
+        fires after startup has settled. Measured: without the deferred pass
+        the roles read back as Krita's #363636/#9ca2ae.
         """
+        self._apply_tooltip_palette()
+        QTimer.singleShot(4000, self._apply_tooltip_palette)
+
+    @staticmethod
+    def _apply_tooltip_palette() -> None:
+        """Black tooltip background, white text. See above for why."""
         app = QApplication.instance()
         if app is None:  # pragma: no cover - no application, nothing to do
             return
         pal = QPalette(app.palette())
-        pal.setColor(QPalette.ToolTipBase, TOOLTIP_BG)
-        pal.setColor(QPalette.ToolTipText, TEXT_BRIGHT)
+        pal.setColor(QPalette.ToolTipBase, QColor(0, 0, 0))
+        pal.setColor(QPalette.ToolTipText, QColor(255, 255, 255))
         app.setPalette(pal)
+        # The palette alone does not render: Krita's style paints tooltip
+        # windows itself. So a QToolTip rule is appended to the application's
+        # existing stylesheet -- Krita's rules stay, ours wins by order.
+        marker = "/* Lumina tooltips */"
+        current = app.styleSheet() or ""
+        if marker not in current:
+            app.setStyleSheet(current + marker +
+                "QToolTip { background-color: #000000; color: #ffffff; "
+                "border: 1px solid #3a404e; padding: 4px 6px; }")
 
     def __init__(self):
         LOG.info("SphereDocker.__init__ START")
@@ -1471,7 +1494,41 @@ class SphereDocker(QDockWidget):
         orb_grid = QGridLayout(orb_holder)
         orb_grid.setContentsMargins(0, 0, 0, 0)
         orb_grid.addWidget(self._orb, 0, 0)
-        orb_layout.addWidget(orb_holder, alignment=Qt.AlignCenter)
+
+        # Presets flank the orb, three per side, instead of sitting in a grid
+        # below it: at panel width a 3x2 grid pushed everything else down, and
+        # the sphere is the visual anchor the presets modify, so they belong
+        # beside it. Left column holds presets 0-2, right column 3-5.
+        def _preset_cell(btn, preset):
+            cell = QWidget()
+            cv = QVBoxLayout(cell)
+            cv.setContentsMargins(0, 0, 0, 0)
+            cv.setSpacing(1)
+            cv.addWidget(btn, alignment=Qt.AlignCenter)
+            cap = QLabel(preset["label"])
+            cap.setAlignment(Qt.AlignCenter)
+            cap.setStyleSheet("QLabel { color: #b9c3d2; font-size: 9px; }")
+            cv.addWidget(cap)
+            return cell
+
+        def _preset_column(indexes):
+            col = QVBoxLayout()
+            col.setContentsMargins(0, 0, 0, 0)
+            col.setSpacing(4)
+            col.addStretch(1)
+            for i in indexes:
+                col.addWidget(_preset_cell(self._preset_btns[i], _PRESETS[i]),
+                              alignment=Qt.AlignCenter)
+            col.addStretch(1)
+            return col
+
+        orb_row = QHBoxLayout()
+        orb_row.setContentsMargins(0, 0, 0, 0)
+        orb_row.setSpacing(2)
+        orb_row.addLayout(_preset_column((0, 1, 2)), 0)
+        orb_row.addWidget(orb_holder, alignment=Qt.AlignCenter)
+        orb_row.addLayout(_preset_column((3, 4, 5)), 0)
+        orb_layout.addLayout(orb_row)
 
         self._readout = QLabel("")
         self._readout.setAlignment(Qt.AlignCenter)
@@ -1527,6 +1584,10 @@ class SphereDocker(QDockWidget):
         layout.addWidget(self.light_row)
         layout.addWidget(self.contrast_row)
 
+        # (Presets now flank the orb above, three per side, instead of a grid
+        # here: at panel width the 3x2 grid pushed everything else down, and the
+        # sphere is the visual anchor the presets modify.)
+
         # ------------------------------------------------------------------
         # Advanced (collapsible)
         # ------------------------------------------------------------------
@@ -1537,61 +1598,6 @@ class SphereDocker(QDockWidget):
                     self.mixer_row):
             self.advanced.add_row(row)
         layout.addWidget(self.advanced)
-
-        # ------------------------------------------------------------------
-        # Lighting presets
-        # ------------------------------------------------------------------
-        # Labelled, because checkable glyph buttons on their own read as
-        # generic toggles rather than as a named set of looks.
-        #
-        # Laid out 3x2 rather than as one row: six captioned glyphs side by side
-        # needed ~430px against a panel that is ~230px wide, so the row either
-        # overflowed or crushed the captions. A grid keeps every label legible
-        # and adds no horizontal scroll.
-        plab = QLabel("Presets")
-        plab.setStyleSheet(
-            "QLabel { color: %s; font-size: 11px; font-weight: 600; "
-            "letter-spacing: 0.3px; }" % TEXT_DIM.name())
-        plab.setContentsMargins(10, 0, 0, 0)
-        layout.addWidget(plab)
-
-        grid = QGridLayout()
-        grid.setContentsMargins(6, 2, 6, 0)
-        grid.setHorizontalSpacing(4)
-        grid.setVerticalSpacing(6)
-        for i, (btn, preset) in enumerate(zip(self._preset_btns, _PRESETS)):
-            cell = QWidget()
-            cv = QVBoxLayout(cell)
-            cv.setContentsMargins(0, 0, 0, 0)
-            cv.setSpacing(2)
-            cv.addWidget(btn, alignment=Qt.AlignCenter)
-            cap = QLabel(preset["label"])
-            cap.setAlignment(Qt.AlignCenter)
-            cap.setStyleSheet("QLabel { color: #b9c3d2; font-size: 9px; }")
-            cv.addWidget(cap)
-            grid.addWidget(cell, i // 3, i % 3, alignment=Qt.AlignCenter)
-        for col in range(3):
-            grid.setColumnStretch(col, 1)
-        layout.addLayout(grid)
-
-        # ------------------------------------------------------------------
-        # Send the base color to the brush
-        # ------------------------------------------------------------------
-        # A text button rather than another glyph: it is an action, not a
-        # preset, and "Apply" gave no hint that it changes Krita's foreground.
-        self.apply_btn = QPushButton("Use base color as brush")
-        self.apply_btn.setCursor(Qt.PointingHandCursor)
-        # Keep this to one short line. A long or multi-paragraph tooltip is not
-        # wrapped by Qt, so an over-long line rendered as a banner stretching
-        # most of the screen width and covering the canvas.
-        self.apply_btn.setToolTip("Send the base color to Krita's brush color")
-        self.apply_btn.setStyleSheet(
-            "QPushButton { background-color: #3b414a; color: #ccd5e2; "
-            "border: 1px solid rgba(255,255,255,60); border-radius: 5px; "
-            "font-size: 10px; padding: 5px; }"
-            "QPushButton:hover { background-color: #464d57; }"
-            "QPushButton:pressed { background-color: #2e333a; }")
-        layout.addWidget(self.apply_btn)
 
         # Anything left over goes to the bottom of the panel rather than being
         # distributed between the controls.
@@ -1622,9 +1628,12 @@ class SphereDocker(QDockWidget):
             azimuth=int(self.processor.engine.light_azimuth_deg),
             elevation=int(math.degrees(self.processor.engine.light_elevation_rad)),
             quality=self._orb_render_size,
+            highlight_size=self._shininess_to_size(
+                self.processor.engine.shininess),
             parent=main)
         self._settings_panel.bind(self._on_settings_changed, self._on_settings_reset,
                                   self._on_settings_save)
+        self._settings_panel.apply_btn.clicked.connect(self._on_apply_selection)
         self._settings_panel.hide()
 
         # Paint the initial state so the swatch / dots / gradients are correct
@@ -1918,6 +1927,13 @@ class SphereDocker(QDockWidget):
                 int(state["azimuth"]), math.radians(float(state["elevation"])))
             self._orb_render_size = int(state["quality"])
             self._orb.set_show_pointer(bool(state["pointer"]))
+            # Highlight size drives the same shininess as the Advanced
+            # "Specular" row. The row is synced to match, so the two controls
+            # never disagree about the engine value they both own.
+            if "highlight_size" in state:
+                self.processor.set_shininess(
+                    self._size_to_shininess(int(state["highlight_size"])))
+                self.specular_row.set_value(int(self.processor.engine.shininess))
             self._rebuild_orb()
         except Exception as exc:  # pragma: no cover - UI only
             LOG.exception("_on_settings_changed failed")
@@ -1951,6 +1967,7 @@ class SphereDocker(QDockWidget):
         out = {
             "azimuth": int(eng.light_azimuth_deg),
             "elevation": int(round(math.degrees(eng.light_elevation_rad))),
+            "highlight_size": self._shininess_to_size(eng.shininess),
             "quality": int(getattr(self, "_orb_render_size", ORB_RENDER)),
             "sampler": bool(self._orb._show_pointer),
             "diffuse": self._knee_to_level(eng.spec_knee),
@@ -2018,21 +2035,23 @@ class SphereDocker(QDockWidget):
                         if qc.isValid():
                             self._targets[name] = qc
                 eng.set_light_angle(int(num("azimuth", 300, 0, 359)),
-                                    math.radians(num("elevation", 60, 0, 90)))
+                                    math.radians(num("elevation", 45, 0, 90)))
                 self._orb_render_size = int(num("quality", ORB_RENDER, 64, 512))
                 self._orb.set_show_pointer(str(s.value("sampler", "true")).lower()
                                            not in ("false", "0"))
                 self.processor.set_spec_knee(self._level_to_knee(
                     int(num("diffuse", self._knee_to_level(SPEC_KNEE), 0, 100))))
-                # Contrast defaults to 50 (neutral). The slider spans 0-300 and 100 is the
-                # engine's no-op, so a "default" of 100 rendered with tone
-                # mapping switched on but doing nothing -- which is harder to
-                # reason about than 50, where the slider sits where the shader
-                # actually begins to bite.
-                self.processor.set_contrast(num("contrast", 50, 0, 300) / 100.0)
+                # Contrast defaults to 100 -- the middle of the 0-200 slider,
+                # which is also the engine's no-op (1.0 = identity in the tone
+                # curve). Below or above that, tone mapping reshapes the falloff.
+                self.processor.set_contrast(num("contrast", 100, 0, 300) / 100.0)
                 self.processor.set_light_intensity(
                     num("intensity", 100, 0, 200) / 100.0)
                 self.processor.set_ambient(num("ambient", 10, 0, 100) / 100.0)
+                # "specular" stays the canonical persisted shininess. The gear's
+                # highlight-size slider drives the same engine value, but it is
+                # mapped from it at sync time rather than read separately, so the
+                # two controls can never disagree about what is saved.
                 self.processor.set_shininess(num("specular", 2, 1, 128))
                 self.processor.set_glow_intensity(num("glow", 0, 0, 100) / 100.0)
                 self.processor.set_brightness(num("tone", 100, 0, 200) / 100.0)
@@ -2076,6 +2095,7 @@ class SphereDocker(QDockWidget):
             self._settings_panel.sync_from(
                 int(eng.light_azimuth_deg),
                 int(round(math.degrees(eng.light_elevation_rad))),
+                self._shininess_to_size(eng.shininess),
                 int(getattr(self, "_orb_render_size", ORB_RENDER)),
                 bool(self._orb._show_pointer),
             )
@@ -2091,10 +2111,15 @@ class SphereDocker(QDockWidget):
                 self._targets[key] = QColor(col)
                 self._hue_memory[key] = QColor(col).getHsvF()[0]
             self._active_target = "base"
-            self.processor.set_light_angle(300.0, math.radians(60.0))
+            self.processor.set_light_angle(300.0, math.radians(45.0))
             self.processor.set_mixer_mode("Blended")
             self.mixer_row.set_mode("Blended")
-            self._on_contrast_changed(50)
+            # Set the slider, not the engine: the row's valueChanged handler
+            # applies it to the engine, so both end up at 100 together. Calling
+            # _on_contrast_changed directly updated the engine but left the
+            # slider showing the old position -- Reset then lied about the
+            # state it had just restored.
+            self.contrast_row.set_value(100)
             # Reset every value the setup persists, not just contrast and the
             # targets. It used to leave ambient, intensity, specular, diffuse,
             # glow, tone and base level untouched, so "Reset all" left most of
@@ -2173,7 +2198,8 @@ class SphereDocker(QDockWidget):
         # _PRESETS table. Connecting them again here used to be the only thing
         # wiring them up, and left two dead references to handlers that no
         # longer exist.
-        self.apply_btn.clicked.connect(self._on_apply_selection)
+        # (The "Use base color as brush" button lives in the gear popup now,
+        # wired where the panel is constructed.)
 
     # ------------------------------------------------------------------
     # Target color sliders -> active target
@@ -2388,6 +2414,22 @@ class SphereDocker(QDockWidget):
         k = max(SPEC_KNEE_MIN, min(SPEC_KNEE_MAX, knee))
         return int(round((SPEC_KNEE_MAX - k) / (SPEC_KNEE_MAX - SPEC_KNEE_MIN) * 100))
 
+    @staticmethod
+    def _size_to_shininess(level: int) -> float:
+        """Map the gear's 0-100 highlight size onto engine shininess (128-1).
+
+        Inverted, because the engine parameter runs the other way: a *high*
+        shininess is a pinpoint highlight, so size 100 -> shininess 1.
+        """
+        t = max(0.0, min(1.0, level / 100.0))
+        return max(1.0, min(128.0, 128.0 - t * 127.0))
+
+    @staticmethod
+    def _shininess_to_size(shininess: float) -> int:
+        """Inverse of :meth:`_size_to_shininess`, for restoring a saved value."""
+        s = max(1.0, min(128.0, shininess))
+        return int(round((128.0 - s) / 127.0 * 100))
+
     def _on_glow_changed(self, value):
         try:
             LOG.info(f"_on_glow_changed value={value}")
@@ -2453,6 +2495,16 @@ class SphereDocker(QDockWidget):
             p.set_contrast(values["contrast"] / 100.0)
         if "specular" in values:
             p.set_shininess(values["specular"])
+            # The gear's highlight-size slider owns the same engine value.
+            # Blocked while setting, since the panel reports its whole state on
+            # every emission and an unblocked set would push a half-applied mix
+            # back into the engine.
+            self._settings_panel.highlight_size.blockSignals(True)
+            try:
+                self._settings_panel.highlight_size.setValue(
+                    self._shininess_to_size(values["specular"]))
+            finally:
+                self._settings_panel.highlight_size.blockSignals(False)
         if "diffuse" in values:
             p.set_spec_knee(self._level_to_knee(values["diffuse"]))
         if "mixer" in values:

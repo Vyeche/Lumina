@@ -67,7 +67,7 @@ The selected dot has a light ring around it.
 |---|---|---|
 | **Hue** | 0–359 | Changes the hue of the **selected target**. Fixed rainbow track. |
 | **Saturation** | 0–100 | Changes the saturation of the selected target. The track re-renders as grey → full color at the current hue. |
-| **Contrast** | 0–100 | Controls how sharply the light falls off into shadow on the orb. It does **not** change a color. |
+| **Contrast** | 0–200, default 100 (middle) | Controls how sharply the light falls off into shadow on the orb. 100 is neutral -- below or above that, tone mapping reshapes the falloff. It does **not** change a color. |
 
 ### Advanced (collapsed)
 
@@ -85,13 +85,19 @@ not fit, so nothing spills out over the dockers below it:
 | **Tone** | Global saturation of the rendered result. |
 | **Mixer** | How the light components blend: **Blended**, **Additive** or **Multiplicative**. |
 
-### Bottom row
+### Presets
+
+One-click looks, above the Advanced section. Each sets the highlight color,
+lighting sliders and mixer mode together:
 
 | Button | What it does |
 |---|---|
-| **Artistic** | Bright white highlights, higher contrast. |
-| **Real** | Warm highlights, softer natural contrast. |
-| **Apply** | Sends the **base color** to Krita's foreground. Use it after editing with the sliders, since slider edits do not touch the brush. |
+| **Artistic** | Bright white highlights, high contrast. |
+| **Real** | Warm highlights, soft natural contrast. |
+| **Nocturne** | Low key, cool moonlight, deep shadow. |
+| **Gloss** | Tight bright highlight, slick and punchy. |
+| **Matte** | Even clay-like falloff, no specular hotspot. |
+| **Neon** | Saturated and blooming, coloured light. |
 
 ---
 
@@ -136,17 +142,19 @@ Sampler, the palette, or the Color Selector docker.
 |---|---|
 | **Light azimuth** | Rotates the main light around the sphere, 0–359°. |
 | **Light height** | Raises and lowers the light, 0–90°. |
+| **Light azimuth size** | Highlight size on the orb, 0–100. Up means a bigger, softer highlight. Drives the same sharpness as the Advanced **Specular** row, so the two stay in sync. |
 | **Quality** | Render grid size. *Low* is smoothest while dragging, *High* is finest. |
 | **Show color cursor** | Show or hide the ring that follows the pointer over the orb. It marks the exact pixel being read and previews that color; it does not magnify. |
+| **Use base color as brush** | Sends the **base color** to Krita's foreground. Use it after editing with the sliders, since slider edits do not touch the brush. |
 | **Reset all** | Restores every color and lighting value to its default, and saves that reset. |
 | **Save settings** | Writes your current setup to disk. Changes already save as you make them, so this is a checkpoint — it confirms the write rather than being the only chance to keep your work. |
 
 ### Saved settings
 
 Your setup is written to a plain-text file and restored automatically the next
-time Krita opens: the three target colors, the light direction, quality,
-sampler visibility, and every slider (contrast, intensity, ambient, specular,
-diffuse, glow, tone, base level and the mixer mode). Nothing is lost if Krita
+time Krita opens: the three target colors, the light direction, highlight
+size, quality, sampler visibility, and every slider (contrast, intensity,
+ambient, specular, diffuse, glow, tone, base level and the mixer mode). Nothing is lost if Krita
 crashes, because each change is saved as you make it.
 
 Two things are deliberately *not* saved: the colour you last picked for

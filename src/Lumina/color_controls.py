@@ -373,8 +373,8 @@ class SettingsPanel(QWidget):
 
     QUALITY = (("Low", 128), ("Med", 200), ("High", 288))
 
-    def __init__(self, azimuth: int = 300, elevation: int = 60,
-                 quality: int = 200, parent=None):
+    def __init__(self, azimuth: int = 300, elevation: int = 45,
+                 quality: int = 200, highlight_size: int = 99, parent=None):
         super().__init__(parent, Qt.Popup)
         self.setStyleSheet(
             "QWidget { background-color: #343941; color: #e2e6ef; }"
@@ -395,6 +395,13 @@ class SettingsPanel(QWidget):
 
         self.azimuth = self._add_slider(root, "Light azimuth", 0, 359, azimuth)
         self.elevation = self._add_slider(root, "Light height", 0, 90, elevation)
+        # Highlight size, 0-100, driving the same specular sharpness as the
+        # Advanced "Specular" row but in the direction a painter thinks: up
+        # means a bigger, softer highlight. Kept in sync with that row by the
+        # docker, since two sliders own one engine value.
+        self.highlight_size = self._add_slider(root, "Light azimuth size",
+                                                0, 100, highlight_size)
+        self.highlight_size.setToolTip("Highlight size on the orb")
 
         qrow = QHBoxLayout()
         qrow.setSpacing(4)
@@ -417,6 +424,22 @@ class SettingsPanel(QWidget):
         self.pointer_cb = CheckBox("Show color cursor")
         self.pointer_cb.setChecked(True)
         root.addWidget(self.pointer_cb)
+
+        # Sends the base color to Krita's foreground so the brush can use it.
+        # Moved here from the main panel, where it sat below the presets as a
+        # full-width button: it is an action, not a setting, and the panel reads
+        # better without it. Kept short-tooltipped -- see the main panel notes
+        # on Qt rendering long tooltips as screen-wide banners.
+        self.apply_btn = QPushButton("Use base color as brush")
+        self.apply_btn.setCursor(Qt.PointingHandCursor)
+        self.apply_btn.setToolTip("Send the base color to Krita's brush color")
+        self.apply_btn.setStyleSheet(
+            "QPushButton { background-color: #3b414a; color: #ccd5e2; "
+            "border: 1px solid rgba(255,255,255,60); border-radius: 5px; "
+            "font-size: 10px; padding: 4px; }"
+            "QPushButton:hover { background-color: #464d57; }"
+            "QPushButton:pressed { background-color: #2e333a; }")
+        root.addWidget(self.apply_btn)
 
         reset = QPushButton("Reset all")
         reset.setCursor(Qt.PointingHandCursor)
@@ -448,6 +471,7 @@ class SettingsPanel(QWidget):
 
         self.azimuth.valueChanged.connect(self._emit)
         self.elevation.valueChanged.connect(self._emit)
+        self.highlight_size.valueChanged.connect(self._emit)
         self.pointer_cb.stateChanged.connect(self._emit)
 
     @staticmethod
@@ -461,19 +485,54 @@ class SettingsPanel(QWidget):
                 "font-size: 9px; padding: 3px 0; }")
 
     def _add_slider(self, root, label, lo, hi, value):
+        # Label column is wide enough for the longest caption ("Light azimuth
+        # size"): at 74px it was truncated mid-word. The popup grows to fit,
+        # which is the requested "slightly bigger" -- no fixed popup width to
+        # update.
         row = QWidget()
         rh = QHBoxLayout(row)
         rh.setContentsMargins(0, 0, 0, 0)
         rh.setSpacing(6)
         lab = QLabel(label)
-        lab.setFixedWidth(74)
+        lab.setFixedWidth(110)
         rh.addWidget(lab)
         sl = ColorSlider(Accent.NEUTRAL, Qt.Horizontal)
         sl.setRange(lo, hi)
         sl.setValue(value)
         rh.addWidget(sl, 1)
+        # Track-percentage readout: where the handle sits as % of the range.
+        # Uniform across sliders, so 50% always means the middle -- which is
+        # what the eye checks. Updates live on drag and on programmatic sync.
+        val = QLabel()
+        val.setFixedWidth(36)
+        val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        val.setStyleSheet("color: #e2e6ef; font-size: 10px;")
+        rh.addWidget(val)
+        sl.valueChanged.connect(
+            lambda v, s=sl, w=val: w.setText(self._track_pct(s)))
+        val.setText(self._track_pct(sl))
+        if not hasattr(self, "_readouts"):
+            self._readouts = {}
+        self._readouts[sl] = val
         root.addWidget(row)
         return sl
+
+    @staticmethod
+    def _track_pct(sl) -> str:
+        """Handle position as a percentage of the slider's range."""
+        lo, hi = sl.minimum(), sl.maximum()
+        if hi <= lo:
+            return "0%"
+        return "%d%%" % round((sl.value() - lo) / (hi - lo) * 100)
+
+    def _refresh_readouts(self) -> None:
+        """Repaint every readout from its slider's current value.
+
+        Needed after programmatic changes (sync_from blocks signals, so the
+        live valueChanged handler never fires and the numbers go stale).
+        """
+        for sl, val in getattr(self, "_readouts", {}).items():
+            val.setText(self._track_pct(sl))
 
     def _set_quality(self, res, name):
         self._quality = res
@@ -487,6 +546,7 @@ class SettingsPanel(QWidget):
             self._on_change({
                 "azimuth": self.azimuth.value(),
                 "elevation": self.elevation.value(),
+                "highlight_size": self.highlight_size.value(),
                 "quality": self._quality,
                 "pointer": self.pointer_cb.isChecked(),
             })
@@ -501,7 +561,8 @@ class SettingsPanel(QWidget):
         self._saved_label.setText("Saved")
         self._saved_timer.start(1600)
 
-    def sync_from(self, azimuth, elevation, quality, pointer) -> None:
+    def sync_from(self, azimuth, elevation, highlight_size, quality,
+                    pointer) -> None:
         """Mirror engine state into the widgets without emitting.
 
         Every one of these widgets reports the panel's *entire* state on
@@ -509,18 +570,21 @@ class SettingsPanel(QWidget):
         new and still-default values back at the owner. Blocked, so restoring
         state is a single silent step.
         """
-        widgets = (self.azimuth, self.elevation, self.pointer_cb)
+        widgets = (self.azimuth, self.elevation, self.highlight_size,
+                   self.pointer_cb)
         for w in widgets:
             w.blockSignals(True)
         try:
             self.azimuth.setValue(int(azimuth))
             self.elevation.setValue(int(elevation))
+            self.highlight_size.setValue(int(highlight_size))
             self.pointer_cb.setChecked(bool(pointer))
             for name, res in self.QUALITY:
                 self._quality_buttons[name].setChecked(res == int(quality))
                 self._quality_buttons[name].setStyleSheet(
                     self._btn_style(res == int(quality)))
             self._quality = int(quality)
+            self._refresh_readouts()
         finally:
             for w in widgets:
                 w.blockSignals(False)

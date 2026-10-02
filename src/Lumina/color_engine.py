@@ -127,7 +127,9 @@ class ColorEngine:
         # --- Lighting state -------------------------------------------------
         self.ambient = 0.1                      # 0.0 - 1.0
         self.light_azimuth_deg = 300.0          # degrees, 0..360
-        self.light_elevation_rad = math.pi / 3  # radians, 0..pi/2
+        # 45 degrees: half of the gear slider's 0-90 range, so the Light height
+        # handle opens in the middle. Saved settings and presets override this.
+        self.light_elevation_rad = math.pi / 4  # radians, 0..pi/2
         # Specular sharpness. Measured on the rendered disc, the highlight's
         # area scales roughly as 1/shininess: 30 -> 223px, 14 -> 468px, 10 -> 651px
         # against a disc of ~26,500px. At 30 the highlight covered under 1% of the
@@ -156,7 +158,10 @@ class ColorEngine:
 
         # --- Intensity / effect state --------------------------------------
         self.light_intensity = 1.0               # 0.0 - 2.0
-        self.contrast = 1.0                       # 1.0 = neutral
+        # 1.0 = the tone-mapping no-op, and the slider's midpoint: the Contrast
+        # row spans 0-200, so the engine default lands the handle in the middle
+        # at 100. Saved settings and presets override this on load.
+        self.contrast = 1.0
         self.brightness = 1.0                     # 0.0 - 2.0
         self.saturation = 1.0                     # 0.0 - 2.0
 

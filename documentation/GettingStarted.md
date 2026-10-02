@@ -60,9 +60,12 @@ bottom:
 | Round glyphs | **Shadow**, **Light** and **Base** target selectors. |
 | Hue / Saturation / Light | Edits whichever target is active. |
 | Contrast | Light falloff across the sphere. |
+| Presets | Six one-click looks, three per side of the orb. |
 | Advanced | The remaining lighting sliders and settings. |
-| Presets | Six one-click looks. |
-| Use base color as brush | Sends the base colour to Krita's foreground. |
+
+The **Use base color as brush** button lives in the gear **Settings** popup:
+it sends the base colour to Krita's foreground. Slider edits never touch the
+brush on their own.
 
 ![The panel as it opens, seeded from a sunset orange](../images/step1_panel.png)
 
