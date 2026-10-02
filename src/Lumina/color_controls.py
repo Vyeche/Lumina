@@ -414,7 +414,7 @@ class SettingsPanel(QWidget):
         root.addLayout(qrow)
 
         # The tick box is drawn by hand -- see CheckBox for why.
-        self.pointer_cb = CheckBox("Show color sampler")
+        self.pointer_cb = CheckBox("Show color cursor")
         self.pointer_cb.setChecked(True)
         root.addWidget(self.pointer_cb)
 

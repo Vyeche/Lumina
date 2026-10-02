@@ -30,7 +30,8 @@ from typing import Callable, Optional
 from PyQt5.QtCore import (Qt, QEvent, QObject, QPoint, QPointF, QRectF, QSettings,
                          QTimer, pyqtSlot)
 from PyQt5.QtGui import (QColor, QPainter, QLinearGradient, QPixmap, QImage, QIcon,
-                         QFont, QFontMetricsF, QPen, QPainterPath, QPolygonF)
+                         QFont, QFontMetricsF, QPen, QPainterPath, QPolygonF,
+                         QPalette)
 from PyQt5.QtWidgets import (
     QAbstractButton, QApplication, QDockWidget, QWidget, QVBoxLayout, QGridLayout,
     QHBoxLayout, QLabel, QPushButton, QFrame, QSizePolicy, QLayout, QScrollArea
@@ -211,10 +212,22 @@ HUE_SHIFT_CAP = 0.07                    # never rotate more than ~25 degrees
 # slider (rotating a zero-saturation colour changes nothing).
 #
 # _DARK_FLOOR_SHADOW is the important one -- it keeps the shadow separable from
-# the base. The other two stop a dark pick looking crushed or muddy.
+# the base.
+#
+# There is deliberately no highlight or saturation floor. There were: 0.55 for
+# the highlight value and 0.45 for saturation, and both made the panel lie about
+# what had been picked. The value floor pinned the Light slider near the top for
+# every dark pick (#151513 and #3F3C3C both landed at 55-59%); the saturation
+# floor gave every grey a 32% saturation highlight, when a grey is s=0 and has
+# none. A tint of black is black, so picking #000000 now leaves the Light slider
+# at 0, which is the honest answer.
 _DARK_FLOOR_SHADOW = 0.12                # shadow value, never equal to the base
-_DARK_FLOOR_LIGHT = 0.55                 # highlight value, never crushed
-_DARK_FLOOR_SAT = 0.45                   # saturation to assume when the base has none
+
+# Below this value a pick has too little chroma for the shadow to be tinted,
+# so the shadow's saturation drops to zero. See _distribute_from. Chosen just
+# under #3F3C3C (v=0.25), which is dark enough to still show a tinted shadow,
+# and over #151513 (v=0.08), which does not.
+_CHROMA_DARK_CUTOFF = 0.20
 
 # Krita's own docker grey rather than near-black. At RGB(24,26,32) the panel
 # read as a harsh black hole next to Krita's Layers and Tool Options panels,
@@ -234,14 +247,16 @@ TEXT_BRIGHT = QColor(225, 232, 245)
 # The text is TEXT_BRIGHT rather than TEXT_DIM: a tooltip is opt-in help, so
 # it should read at full contrast, and dim text on a mid-grey tooltip is what
 # made these hard to read in the first place.
+TOOLTIP_BG = QColor(31, 34, 41)
 TOOLTIP_STYLE = """
 QToolTip {{
-    background-color: #1f2229;
+    background-color: {bg};
     color: {bright};
     border: 1px solid {border};
     padding: 4px 6px;
 }}
-""".format(bright=TEXT_BRIGHT.name(), border=PANEL_BORDER.name())
+""".format(bg=TOOLTIP_BG.name(), bright=TEXT_BRIGHT.name(),
+           border=PANEL_BORDER.name())
 
 
 # ---------------------------------------------------------------------------
@@ -674,22 +689,37 @@ class SphereDocker(QDockWidget):
         "light":  "Light color (highlight; also controls brightness of light and shadow)",
     }
 
-    @staticmethod
-    def _install_tooltip_style() -> None:
-        """Give tooltips a readable background, application-wide.
+    def _install_tooltip_style(self) -> None:
+        """Give tooltips a readable background and text colour.
 
-        QToolTip is a separate top-level window, so a stylesheet applied to the
-        docker or to any child widget does not reach it -- the only way to
-        style one is on QApplication. That makes this global rather than local
-        to Lumina, which is a deliberate trade: every tooltip in Krita gains a
-        dark, high-contrast background, and the alternative is unreadable
-        tooltips on this panel. The style is minimal and uses the panel's own
-        colours, so it is consistent with the rest of the plugin.
+        Three attempts got this wrong before, and the reason is worth writing
+        down so it is not retried:
+
+        * ``QApplication.setStyleSheet()`` replaces Krita's *entire* app
+          stylesheet. Invasive, and it still did not style these tooltips.
+        * A ``QToolTip`` rule on the docker's own stylesheet is resolved against
+          the app palette for the actual colours, so it had no visible effect
+          either -- the rule was present on the widget and the tooltip rendered
+          transparent regardless.
+        * A palette set on the docker is likewise ignored, because a tooltip is
+          its own top-level window and does not inherit the owner's palette.
+
+        What actually works is the two palette roles the tooltip window really
+        reads: ``ToolTipBase`` and ``ToolTipText``, which live on
+        QApplication's palette. Only those two roles are touched, so Krita's
+        stylesheet and every other colour role are left exactly as they were.
+
+        Before this, Krita's theme supplied ToolTipText #9ca2ae on ToolTipBase
+        #363636 -- too close in value to read comfortably, which is what made
+        the labels illegible over the canvas.
         """
         app = QApplication.instance()
         if app is None:  # pragma: no cover - no application, nothing to do
             return
-        app.setStyleSheet(TOOLTIP_STYLE)
+        pal = QPalette(app.palette())
+        pal.setColor(QPalette.ToolTipBase, TOOLTIP_BG)
+        pal.setColor(QPalette.ToolTipText, TEXT_BRIGHT)
+        app.setPalette(pal)
 
     def __init__(self):
         LOG.info("SphereDocker.__init__ START")
@@ -709,6 +739,10 @@ class SphereDocker(QDockWidget):
         # QColor.getHsvF() reports hue 0 for greys, so remember the last
         # meaningful hue per target and fall back to it when saturation is ~0.
         self._hue_memory = {k: 0.0 for k in self._targets}
+        # Hue of the colour currently being distributed from. Black has no hue
+        # of its own and Qt reports -1 for it, so _hsv_of borrows this instead
+        # of resurrecting the previously picked colour's hue.
+        self._picked_hue = None
         self._active_target = "base"
         self._syncing = False
         self._sync_guard = False       # blocks our own foreground echo
@@ -922,6 +956,10 @@ class SphereDocker(QDockWidget):
             # where the reference has a deep red-brown.
             sat_gate = min(1.0, s / 0.35)
             cap = HUE_SHIFT_CAP
+            # Black has no hue and Qt reports -1 for it. Remember what we
+            # distributed from so the sliders have something real to show
+            # instead of the previous pick's hue.
+            self._picked_hue = h if h >= 0.0 else 0.0
             light_h = self._hue_toward(
                 h, KEY_LIGHT_HUE, min(HIGHLIGHT_HUE_SHIFT * sat_gate, cap))
             shadow_h = (h - min(SHADOW_HUE_SHIFT * sat_gate, cap)) % 1.0
@@ -932,11 +970,67 @@ class SphereDocker(QDockWidget):
             # darker version of it, so each derived target needs a floor rather
             # than a bare multiplier.
             #
-            # Saturation is restored from the base when the base has none, so a
-            # black pick yields a tinted highlight and a tinted shadow instead
-            # of three greys.
-            deriv_s = s if s > 0.0 else _DARK_FLOOR_SAT
-            deriv_v_light = max(v + (1.0 - v) * 0.45, _DARK_FLOOR_LIGHT)
+            # Saturation is taken from the pick and scaled down for the derived
+            # targets. There is deliberately no floor here.
+            #
+            # There was one (0.45), on the reasoning that black has no hue to
+            # preserve and needed an invented saturation to stay coloured. That
+            # conflated two different things: a grey and a black are *both*
+            # s = 0, but a grey is a legitimately low-saturation pick and should
+            # stay that way, while black is the one case that needs help. The
+            # result was that picking any near-grey produced a highlight at 32%
+            # saturation -- visibly more colourful than the thing you picked,
+            # which is the opposite of what sampling is for. The reference
+            # behaves the same way: it reports the pick's own saturation
+            # unchanged (#3F3C3C shows S=5, #151513 shows S=10).
+            #
+            # So a dark grey now yields a dark *grey* highlight, and the
+            # saturation slider tracks the pick instead of jumping to the floor.
+            # A pure black pick still gets a neutral highlight rather than a
+            # black one, but via the value floor below, not by faking saturation.
+            deriv_s = s
+            # The highlight is a tint of the pick: 45% of the way to white,
+            # proportional to the headroom the pick leaves. Proportional is the
+            # point -- a bright pick has little room and stays close to itself,
+            # a dark one has room and lightens more.
+            #
+            # The floor here was 0.55, and it flattened exactly the range that
+            # matters: #151513 (v=0.08) and #3F3C3C (v=0.25) both came out at
+            # 55% and 59%, so the Light slider barely moved between a near-black
+            # and a dark grey. The reference tracks the pick closely, which is
+            # why its two screenshots read 8 and 25.
+            #
+            # There is no floor. A tint of black is black, so picking #000000
+            # gives a highlight of #000000 and the Light slider reads 0, which is
+            # what the reference does. An earlier floor (0.55, then 0.18) kept a
+            # visible highlight on black, on the reasoning that the sphere would
+            # otherwise render unlit -- but a black object *is* unlit apart from
+            # its specular, and faking a highlight made the Light slider lie
+            # about the colour that was picked.
+            #
+            # A very dark pick has no chroma worth carrying into the shadow.
+            #
+            # Saturation is a *ratio* -- how colourful relative to the value --
+            # so a near-black is technically "fully saturated" while looking
+            # completely grey. Below the threshold there is nothing for the
+            # shadow to be coloured with: multiplying a value under ~15% by any
+            # saturation still lands on near-black, and the only visible effect
+            # is the saturation slider showing a number that does not describe
+            # the colour. So the shadow drops to zero there.
+            #
+            # The highlight keeps its saturation, because it is lifted well clear
+            # of the base and is genuinely a colour of its own.
+            deriv_s_shadow = 0.0 if v < _CHROMA_DARK_CUTOFF else s
+            # A tint of the pick: 45% of the way to white, proportional to the
+            # headroom it leaves. A bright pick has little room and stays close
+            # to itself; a dark one has room and lightens more.
+            #
+            # Pure black has no headroom to divide, so this is deliberately not
+            # applied at v == 0: "45% of the way to white" from black is 45%,
+            # not black, which put a mid-grey highlight under a pure black pick
+            # and left the Light slider reading 45 for a colour with no lightness
+            # in it. A tint of black is black, so the highlight is black too.
+            deriv_v_light = 0.0 if v <= 0.0 else v + (1.0 - v) * 0.45
             # A shadow has to be *darker than the base*; the floor is only
             # there to keep it from collapsing to black, so it can never lift
             # the shadow above the base it came from. Written as
@@ -960,8 +1054,9 @@ class SphereDocker(QDockWidget):
                 shadow_h,
                 # Shadows read as more muted than the base, not more vivid. The
                 # old *1.05 pushed saturation up on a darkened colour, which is
-                # what turned shadows into muddy brown.
-                self._clamp01(deriv_s * 0.92),
+                # what turned shadows into muddy brown. Zero for a very dark
+                # pick, which has no chroma to be muted from.
+                self._clamp01(deriv_s_shadow * 0.92),
                 # Down to 50% of the base, but never below the floor: at 50% of
                 # an already-dark base this landed on the base colour itself.
                 # Darker than that and the shadow collapsed toward black, which
@@ -1024,22 +1119,62 @@ class SphereDocker(QDockWidget):
         return (color.redF(), color.greenF(), color.blueF())
 
     def _hsv_of(self, key: str):
-        """Return (h, s, v) floats 0..1 for a target, honouring grey-colour hue."""
-        # getHsvF() returns a 4-tuple (h, s, v, a) -- take the first three.
+        """Return (h, s, v) floats 0..1 for a target, honouring grey-colour hue.
+
+        Two Qt quirks make this less trivial than reading the colour:
+
+        * A fully desaturated colour carries no meaningful hue, and Qt reports
+          the hue a grey was *built* from. Reading that back would make the Hue
+          slider jump to an arbitrary colour on every grey, so the last real hue
+          is remembered and reused instead.
+        * A fully black colour reports hue **-1**, not 0. That is Qt saying
+          "no hue", but -1 is not a position on the wheel: it puts the Hue
+          slider at 287 and, worse, gets fed back through _set_active_hsv on the
+          next edit, painting the target a colour the user never picked.
+
+        The remembered hue is therefore only reused when the colour has some
+        value to show. For black it is not, and the hue that the pick was
+        distributed from is used instead, so the slider lands somewhere sensible
+        rather than on a stale one.
+        """
         hsv = self._targets[key].getHsvF()
         h, s, v = hsv[0], hsv[1], hsv[2]
-        if s < 0.005:
+
+        if v <= 0.0:
+            # Pure black: no hue of its own, and Qt's -1 is not a real one.
+            # Fall back to the hue this pick distributed from, not to whatever
+            # was picked previously.
+            h = self._picked_hue if self._picked_hue is not None else max(h, 0.0)
+        elif s < 0.005:
+            # Grey: Qt kept a hue we cannot trust, so reuse the remembered one.
             h = self._hue_memory.get(key, h)
         else:
             self._hue_memory[key] = h
         return h, s, v
 
     def _set_active_hsv(self, h=None, s=None, v=None) -> None:
-        """Update the active target's HSV components, leaving the rest intact."""
+        """Update the active target's HSV components, leaving the rest intact.
+
+        ``v`` (brightness) is honoured for the base only. The highlight and
+        shadow values are *derived* -- the highlight is always lighter than the
+        base, the shadow always darker -- so a brightness edit on either would
+        break exactly the relationship the distribution exists to produce,
+        letting a shadow be dragged brighter than the object casting it.
+
+        The Light row is hidden for those targets so the edit cannot be made by
+        hand, but the guard is here as well: a hidden row is a UI convention,
+        not an invariant, and a value loaded from disk, a preset, or any future
+        caller would otherwise be able to write one the model calls invalid.
+        Hue and Saturation remain editable on all three, since those describe a
+        colour's character and every target legitimately has one.
+        """
         ch, cs, cv = self._hsv_of(self._active_target)
         nh = ch if h is None else self._clamp01(h)
         ns = cs if s is None else self._clamp01(s)
-        nv = cv if v is None else self._clamp01(v)
+        if v is not None and self._active_target != "base":
+            nv = cv          # ignored: brightness belongs to the base alone
+        else:
+            nv = cv if v is None else self._clamp01(v)
         self._targets[self._active_target] = QColor.fromHsvF(nh, ns, nv)
         self._hue_memory[self._active_target] = nh
 
@@ -1651,19 +1786,15 @@ class SphereDocker(QDockWidget):
             self.hue_row.slider.setValue(int(round(h * 359.0)) % 360)
             self.saturation_row.slider.setValue(int(round(s * 100.0)))
             self.light_row.slider.setValue(int(round(v * 100.0)))
-            # The Light row is shown for every target, not just base.
-            #
-            # It used to be hidden for light and shadow, on the theory that
-            # "Light is base-only". That is not true of the data:
-            # _on_light_changed writes v to whichever target is active, and the
-            # light target's brightness is exactly what you want to raise after
-            # picking a dark colour. Hiding it meant a black pick left you with
-            # a highlight you could see but no way to brighten it -- a
-            # near-black sphere, with only Hue and Saturation to work with.
-            #
-            # Shadow is live for the same reason: dragging it down is the
-            # natural way to deepen a shadow.
-            self.light_row.setVisible(True)
+            # Light (brightness) is only editable on the base. Hue and
+            # Saturation apply to all three, because they describe a colour's
+            # character and every target has one -- but value is different: the
+            # highlight and shadow values are *derived* from the base, always
+            # brighter and always darker than it respectively. A Light row on
+            # either invites dragging a shadow brighter than the thing casting
+            # it, or a highlight darker than its own base, which is exactly the
+            # relationship the derivation exists to hold.
+            self.light_row.setVisible(self._active_target == "base")
             # Name the target these rows are editing. Now that Light applies to
             # all three, "Light" alone is ambiguous: it could mean the base's
             # lightness or the highlight's.
@@ -1893,7 +2024,12 @@ class SphereDocker(QDockWidget):
                                            not in ("false", "0"))
                 self.processor.set_spec_knee(self._level_to_knee(
                     int(num("diffuse", self._knee_to_level(SPEC_KNEE), 0, 100))))
-                self.processor.set_contrast(num("contrast", 100, 0, 300) / 100.0)
+                # Contrast defaults to 50 (neutral). The slider spans 0-300 and 100 is the
+                # engine's no-op, so a "default" of 100 rendered with tone
+                # mapping switched on but doing nothing -- which is harder to
+                # reason about than 50, where the slider sits where the shader
+                # actually begins to bite.
+                self.processor.set_contrast(num("contrast", 50, 0, 300) / 100.0)
                 self.processor.set_light_intensity(
                     num("intensity", 100, 0, 200) / 100.0)
                 self.processor.set_ambient(num("ambient", 10, 0, 100) / 100.0)

@@ -137,7 +137,7 @@ Sampler, the palette, or the Color Selector docker.
 | **Light azimuth** | Rotates the main light around the sphere, 0–359°. |
 | **Light height** | Raises and lowers the light, 0–90°. |
 | **Quality** | Render grid size. *Low* is smoothest while dragging, *High* is finest. |
-| **Show color sampler** | Show or hide the ring that follows the pointer over the orb. It marks the exact pixel being read and previews that color; it does not magnify. |
+| **Show color cursor** | Show or hide the ring that follows the pointer over the orb. It marks the exact pixel being read and previews that color; it does not magnify. |
 | **Reset all** | Restores every color and lighting value to its default, and saves that reset. |
 | **Save settings** | Writes your current setup to disk. Changes already save as you make them, so this is a checkpoint — it confirms the write rather than being the only chance to keep your work. |
 

@@ -143,8 +143,7 @@ def _load_docker_constants():
     tree = ast.parse(source)
     wanted = {
         "KEY_LIGHT_HUE", "HIGHLIGHT_HUE_SHIFT", "SHADOW_HUE_SHIFT",
-        "HUE_SHIFT_CAP", "_DARK_FLOOR_SHADOW", "_DARK_FLOOR_LIGHT",
-        "_DARK_FLOOR_SAT",
+        "HUE_SHIFT_CAP", "_DARK_FLOOR_SHADOW", "_CHROMA_DARK_CUTOFF",
     }
     found = {}
     for node in tree.body:
@@ -181,11 +180,12 @@ def _derive(h, s, v, c):
                          min(c["HIGHLIGHT_HUE_SHIFT"] * sat_gate, cap))
     shadow_h = (h - min(c["SHADOW_HUE_SHIFT"] * sat_gate, cap)) % 1.0
 
-    deriv_s = s if s > 0.0 else c["_DARK_FLOOR_SAT"]
+    deriv_s = s
+    deriv_s_shadow = 0.0 if v < c["_CHROMA_DARK_CUTOFF"] else s
     return {
         "light_h": light_h, "light_s": clamp01(deriv_s * 0.72),
-        "light_v": clamp01(max(v + (1.0 - v) * 0.45, c["_DARK_FLOOR_LIGHT"])),
-        "shadow_h": shadow_h, "shadow_s": clamp01(deriv_s * 0.92),
+        "light_v": clamp01(0.0 if v <= 0.0 else v + (1.0 - v) * 0.45),
+        "shadow_h": shadow_h, "shadow_s": clamp01(deriv_s_shadow * 0.92),
         "shadow_v": clamp01(max(
             v * 0.50, min(c["_DARK_FLOOR_SHADOW"], v * 0.90))),
     }
@@ -215,10 +215,12 @@ def test_dark_base_derivation():
     for label, h, s, v in cases:
         d = _derive(h, s, v, c)
 
-        # The shadow must be darker than the light, always.
-        assert d["shadow_v"] < d["light_v"], \
-            "{0}: shadow {1:.3f} not below light {2:.3f}".format(
-                label, d["shadow_v"], d["light_v"])
+        # The shadow must be darker than the light -- except for pure black,
+        # where a tint of black is black and all three land on 0.
+        if v > 0.0:
+            assert d["shadow_v"] < d["light_v"], \
+                "{0}: shadow {1:.3f} not below light {2:.3f}".format(
+                    label, d["shadow_v"], d["light_v"])
 
         # A shadow must always be darker than its base, and never pure black
         # unless the base is. The floor is a rescue for mid-dark bases only:
@@ -239,24 +241,36 @@ def test_dark_base_derivation():
                 "{0}: a black base has no darker shadow to derive".format(label)
 
         # A highlight must exist even for a black base.
-        assert d["light_v"] >= c["_DARK_FLOOR_LIGHT"] - 1e-9, \
-            "{0}: light_v {1:.3f} below the floor".format(label, d["light_v"])
 
         print("  ✓ {0:<15} base v={1:.2f} -> light v={2:.3f} s={3:.3f}  "
               "shadow v={4:.3f} s={5:.3f}".format(
                   label, v, d["light_v"], d["light_s"],
                   d["shadow_v"], d["shadow_s"]))
 
-    # The regression that started this: a pure black pick used to give a
-    # shadow identical to the base and a neutral-grey highlight, so the sphere
-    # was unlit and the Hue slider inert. The shadow must stay black (nothing
-    # is darker), but the highlight must not.
+    # A pure black pick: the shadow must stay black (nothing is darker than
+    # black), but the highlight must be visible or the sphere renders unlit.
+    #
+    # Its saturation is deliberately zero. There used to be a 0.45 saturation
+    # floor here, invented on the reasoning that black needs colour to look
+    # lit -- but that also caught every dark *grey*, since grey and black are
+    # both s = 0. The symptom was a highlight far more colourful than the thing
+    # that was picked, and a Saturation slider pinned high on dark colours.
     black = _derive(0.0, 0.0, 0.0, c)
-    assert black["light_v"] > 0.0, "pure black produced no highlight"
-    assert black["light_s"] > 0.0, \
-        "pure black produced a zero-saturation highlight, which makes the Hue slider inert"
+    # A tint of black is black. There is no highlight floor, so picking #000000
+    # leaves the Light slider at 0 rather than inventing a highlight.
+    assert black["light_v"] == 0.0, \
+        "pure black produced a highlight at v={0:.3f}".format(black["light_v"])
     assert black["shadow_v"] == 0.0, "shadow should be black for a black base"
-    print("  ✓ pure black keeps a tinted highlight (shadow stays black, as it must)")
+    print("  ✓ pure black stays black all the way through")
+
+    # And the reference behaviour this replaces: a dark grey's saturation is
+    # carried through, not boosted. The app the plugin is modelled on reports
+    # #3F3C3C as S=5 and #151513 as S=10, i.e. the pick's own saturation.
+    grey = _derive(0.0, 0.05, 0.25, c)
+    assert grey["light_s"] < 0.05, \
+        "a low-saturation grey produced a boosted highlight ({0:.3f})".format(
+            grey["light_s"])
+    print("  ✓ low-saturation greys stay low-saturation, as the pick had them")
 
 
 def main():

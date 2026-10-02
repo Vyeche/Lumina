@@ -169,6 +169,9 @@ orb to 128px, and a slider release would cancel an in-progress window drag.
 
 ### "Show color sampler" toggle did nothing (fixed 2026-09-29)
 
+> Renamed to **Show color cursor** after this was fixed; the symptom below
+> is quoted as it was originally reported.
+
 **Symptom:** unchecking *Show color sampler* in the gear popup left the ring
 following the cursor on the orb. The toggle appeared completely inert.
 
