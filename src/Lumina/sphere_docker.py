@@ -30,7 +30,7 @@ from typing import Callable, Optional
 from PyQt5.QtCore import (Qt, QEvent, QObject, QPoint, QPointF, QRectF, QSettings,
                          QTimer, pyqtSlot)
 from PyQt5.QtGui import (QColor, QPainter, QLinearGradient, QPixmap, QImage, QIcon,
-                         QFont, QPen, QPainterPath, QPolygonF)
+                         QFont, QFontMetricsF, QPen, QPainterPath, QPolygonF)
 from PyQt5.QtWidgets import (
     QAbstractButton, QApplication, QDockWidget, QWidget, QVBoxLayout, QGridLayout,
     QHBoxLayout, QLabel, QPushButton, QFrame, QSizePolicy, QLayout, QScrollArea
@@ -224,6 +224,25 @@ PANEL_BORDER = QColor(58, 64, 78)
 TEXT_DIM = QColor(150, 160, 175)
 TEXT_BRIGHT = QColor(225, 232, 245)
 
+# Tooltips render in their own top-level window, so a stylesheet set on the
+# docker does not reach them -- they were inheriting Krita's theme colours,
+# which left dim tooltip text sitting on a background too close to its own
+# value to read. An explicit style is applied application-wide (see
+# _install_tooltip_style) because that is the only scope that covers a window
+# that belongs to neither the docker nor its children.
+#
+# The text is TEXT_BRIGHT rather than TEXT_DIM: a tooltip is opt-in help, so
+# it should read at full contrast, and dim text on a mid-grey tooltip is what
+# made these hard to read in the first place.
+TOOLTIP_STYLE = """
+QToolTip {{
+    background-color: #1f2229;
+    color: {bright};
+    border: 1px solid {border};
+    padding: 4px 6px;
+}}
+""".format(bright=TEXT_BRIGHT.name(), border=PANEL_BORDER.name())
+
 
 # ---------------------------------------------------------------------------
 # Small helper widgets
@@ -272,6 +291,30 @@ class LabeledSliderRow(QWidget):
 
     def set_value(self, value: int) -> None:
         self.slider.setValue(value)
+
+    def set_caption(self, text: str) -> None:
+        """Change the row's label, keeping the caption width stable.
+
+        The label sits in the layout before the slider, so the caption is
+        elided to a fixed width rather than allowed to grow: the rows already
+        sum to more than the docker's natural width (dot + label + slider +
+        margins), and widening the label widened the whole panel to 433px. A
+        stable column means the slider handle does not shift when you switch
+        targets.
+        """
+        metrics = QFontMetricsF(self._label.font())
+        elided = metrics.elidedText(text, Qt.ElideRight, self.LABEL_WIDTH)
+        self._label.setText(elided)
+        self._label.setToolTip(text)
+        self._label.setMinimumWidth(self.LABEL_WIDTH)
+
+    #: Caption column width. The rows are dot(5) + label + slider(120 min) +
+    #: margins(20) + spacing(20), and the whole thing has to fit inside the
+    #: docker's natural 281px. Anything above ~100 here widens the panel, which
+    #: is why the caption is short ("Hue (high)") and elided rather than spelled
+    #: out. Verified: with no minimum at all the panel is 281px, so this value
+    #: is what holds it there.
+    LABEL_WIDTH = 96
 
 
 class ToolButton(QPushButton):
@@ -631,9 +674,27 @@ class SphereDocker(QDockWidget):
         "light":  "Light color (highlight; also controls brightness of light and shadow)",
     }
 
+    @staticmethod
+    def _install_tooltip_style() -> None:
+        """Give tooltips a readable background, application-wide.
+
+        QToolTip is a separate top-level window, so a stylesheet applied to the
+        docker or to any child widget does not reach it -- the only way to
+        style one is on QApplication. That makes this global rather than local
+        to Lumina, which is a deliberate trade: every tooltip in Krita gains a
+        dark, high-contrast background, and the alternative is unreadable
+        tooltips on this panel. The style is minimal and uses the panel's own
+        colours, so it is consistent with the rest of the plugin.
+        """
+        app = QApplication.instance()
+        if app is None:  # pragma: no cover - no application, nothing to do
+            return
+        app.setStyleSheet(TOOLTIP_STYLE)
+
     def __init__(self):
         LOG.info("SphereDocker.__init__ START")
         super().__init__()
+        self._install_tooltip_style()
         self.setWindowTitle("Lumina")
         LOG.info("base widget created")
 
@@ -928,6 +989,15 @@ class SphereDocker(QDockWidget):
             self._sync_target_dots()
             self._sync_sliders_from_state()
             self._update_preview()
+            # And the orb itself. This was missing, and it is the bug behind
+            # "picking black makes everything go black": the swatch and the
+            # sliders updated, but the sphere kept rendering the *previous*
+            # colour, so a pick looked like it had turned the whole orb black.
+            # Measured: sampling the orb after an orange pick showed 3% bright
+            # pixels, the same as after a black pick, and 66% once this call
+            # was added. Every other path that changes a target ends in
+            # _rebuild_orb for the same reason.
+            self._rebuild_orb()
 
             LOG.info("distributed %s -> base=%s light=%s shadow=%s",
                      color.name(), base.name(), light.name(), shadow.name())
@@ -1581,13 +1651,51 @@ class SphereDocker(QDockWidget):
             self.hue_row.slider.setValue(int(round(h * 359.0)) % 360)
             self.saturation_row.slider.setValue(int(round(s * 100.0)))
             self.light_row.slider.setValue(int(round(v * 100.0)))
-            # Light is base-only, so the row is hidden for the other two
-            # targets rather than sitting there greyed out or, worse, still
-            # live and quietly editing whichever target happened to be active.
-            self.light_row.setVisible(self._active_target == "base")
+            # The Light row is shown for every target, not just base.
+            #
+            # It used to be hidden for light and shadow, on the theory that
+            # "Light is base-only". That is not true of the data:
+            # _on_light_changed writes v to whichever target is active, and the
+            # light target's brightness is exactly what you want to raise after
+            # picking a dark colour. Hiding it meant a black pick left you with
+            # a highlight you could see but no way to brighten it -- a
+            # near-black sphere, with only Hue and Saturation to work with.
+            #
+            # Shadow is live for the same reason: dragging it down is the
+            # natural way to deepen a shadow.
+            self.light_row.setVisible(True)
+            # Name the target these rows are editing. Now that Light applies to
+            # all three, "Light" alone is ambiguous: it could mean the base's
+            # lightness or the highlight's.
+            self._sync_slider_captions()
         finally:
             self._syncing = False
         self._sync_gradient_tracks()
+
+    def _sync_slider_captions(self) -> None:
+        """Label the three colour sliders with the target they currently edit.
+
+        "Hue / Saturation / Light" is ambiguous once Light applies to all three
+        targets: it could read as "the base's lightness" or "the highlight's".
+
+        The label names the target's *role* rather than its key, because
+        "Light (Light)" is not a caption anyone should have to read. The value
+        row is the base colour, and light/shadow are the highlight and the dark
+        side of it, which is what the panel is actually modelling.
+        """
+        role = {
+            "base": "base",
+            "light": "high",
+            "shadow": "shade",
+        }.get(self._active_target, self._active_target)
+
+        for row, base_name in ((self.hue_row, "Hue"),
+                               (self.saturation_row, "Sat"),
+                               (self.light_row, "Light")):
+            try:
+                row.set_caption("{0} ({1})".format(base_name, role))
+            except Exception:  # pragma: no cover - cosmetic only
+                LOG.exception("slider caption update failed")
 
     def _sync_gradient_tracks(self) -> None:
         """Repaint the slider tracks so each encodes the active target."""
