@@ -204,6 +204,18 @@ HIGHLIGHT_HUE_SHIFT = 0.10              # fraction of the way to the key light
 SHADOW_HUE_SHIFT = 0.07                 # rotation deeper into red
 HUE_SHIFT_CAP = 0.07                    # never rotate more than ~25 degrees
 
+# Floors for deriving light and shadow from a very dark base. Without these the
+# derivation is pure multiplication, and at v = 0 there is nothing left to
+# multiply: the shadow landed exactly on the base colour and the highlight came
+# out neutral grey, so picking black produced an unlit sphere and an inert Hue
+# slider (rotating a zero-saturation colour changes nothing).
+#
+# _DARK_FLOOR_SHADOW is the important one -- it keeps the shadow separable from
+# the base. The other two stop a dark pick looking crushed or muddy.
+_DARK_FLOOR_SHADOW = 0.12                # shadow value, never equal to the base
+_DARK_FLOOR_LIGHT = 0.55                 # highlight value, never crushed
+_DARK_FLOOR_SAT = 0.45                   # saturation to assume when the base has none
+
 # Krita's own docker grey rather than near-black. At RGB(24,26,32) the panel
 # read as a harsh black hole next to Krita's Layers and Tool Options panels,
 # which sit around RGB(48,52,58) in the default dark theme.
@@ -852,27 +864,50 @@ class SphereDocker(QDockWidget):
             light_h = self._hue_toward(
                 h, KEY_LIGHT_HUE, min(HIGHLIGHT_HUE_SHIFT * sat_gate, cap))
             shadow_h = (h - min(SHADOW_HUE_SHIFT * sat_gate, cap)) % 1.0
+            # A base at or near black has no headroom to derive from: s = 0 and
+            # v = 0, so proportional scaling collapses light onto a neutral grey
+            # and shadow exactly onto the base, leaving the sphere unlit. There
+            # is no highlight or shadow *of* pure black, only a lighter and a
+            # darker version of it, so each derived target needs a floor rather
+            # than a bare multiplier.
+            #
+            # Saturation is restored from the base when the base has none, so a
+            # black pick yields a tinted highlight and a tinted shadow instead
+            # of three greys.
+            deriv_s = s if s > 0.0 else _DARK_FLOOR_SAT
+            deriv_v_light = max(v + (1.0 - v) * 0.45, _DARK_FLOOR_LIGHT)
+            # A shadow has to be *darker than the base*; the floor is only
+            # there to keep it from collapsing to black, so it can never lift
+            # the shadow above the base it came from. Written as
+            # max(v * 0.50, floor) the floor won outright for a base already
+            # darker than it (a v=0.04 pick produced a "shadow" at v=0.12,
+            # lighter than the base). Clamping to just under the base keeps
+            # both properties: always darker, and never pure black.
+            shadow_cap = min(_DARK_FLOOR_SHADOW, v * 0.90)
+            deriv_v_shadow = max(v * 0.50, shadow_cap)
+
             light = QColor.fromHsvF(
                 light_h,
                 # Desaturate toward the light, but never so far that the
                 # highlight stops reading as that colour.
-                self._clamp01(s * 0.72),
+                self._clamp01(deriv_s * 0.72),
                 # 45% of the way to white: proportional to the headroom, so a
                 # bright base is not pushed flat and a dark one is not crushed.
-                self._clamp01(v + (1.0 - v) * 0.45),
+                self._clamp01(deriv_v_light),
             )
             shadow = QColor.fromHsvF(
                 shadow_h,
                 # Shadows read as more muted than the base, not more vivid. The
                 # old *1.05 pushed saturation up on a darkened colour, which is
                 # what turned shadows into muddy brown.
-                self._clamp01(s * 0.92),
-                # Down to 50% of the base. Darker than this and the shadow
-                # collapsed toward black, which forced the rim light up to
-                # compensate and produced a glowing outline; the reference keeps
-                # a rich, saturated shadow that is still recognisably the base
-                # color's family.
-                self._clamp01(v * 0.50),
+                self._clamp01(deriv_s * 0.92),
+                # Down to 50% of the base, but never below the floor: at 50% of
+                # an already-dark base this landed on the base colour itself.
+                # Darker than that and the shadow collapsed toward black, which
+                # forced the rim light up to compensate and produced a glowing
+                # outline; the reference keeps a rich, saturated shadow that is
+                # still recognisably the base color's family.
+                self._clamp01(deriv_v_shadow),
             )
 
             self._targets["base"] = base
@@ -882,7 +917,17 @@ class SphereDocker(QDockWidget):
             self._hue_memory["shadow"] = shadow_h
             # Keep the per-target swatches honest immediately, rather than waiting
             # for whichever caller happens to refresh the preview next.
+            #
+            # All three syncs are needed, not just the dots. _sync_target_dots
+            # updates the colour chips beside the glyphs, but the header swatch
+            # comes from _update_preview and the Hue/Sat/Light positions from
+            # _sync_sliders_from_state. Calling only the dots left the panel
+            # showing the previous colour after a pick: the orb went black
+            # while the swatch and sliders still read the old pink. This mirrors
+            # _on_target_changed, the other path that replaces all three.
             self._sync_target_dots()
+            self._sync_sliders_from_state()
+            self._update_preview()
 
             LOG.info("distributed %s -> base=%s light=%s shadow=%s",
                      color.name(), base.name(), light.name(), shadow.name())

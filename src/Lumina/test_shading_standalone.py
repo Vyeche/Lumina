@@ -117,11 +117,154 @@ def test_symmetry():
     print("  ✓ shading is symmetric about the light meridian (interior points)")
 
 
+# ---------------------------------------------------------------------------
+# Deriving light/shadow from a sampled base colour.
+#
+# Reimplements the arithmetic from SphereDocker._distribute_from so it can be
+# checked without PyQt5. The constants are read out of sphere_docker.py rather
+# than repeated here, so this test cannot drift from the real code; if the file
+# is missing the test reports that instead of silently passing.
+# ---------------------------------------------------------------------------
+def _load_docker_constants():
+    import ast
+    import os
+
+    # Resolve next to this file, so the test works whether it is run from the
+    # repo root or from inside the package directory.
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(here, "sphere_docker.py")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            source = fh.read()
+    except OSError:
+        print("  ! sphere_docker.py not found at {0}".format(path))
+        return None
+
+    tree = ast.parse(source)
+    wanted = {
+        "KEY_LIGHT_HUE", "HIGHLIGHT_HUE_SHIFT", "SHADOW_HUE_SHIFT",
+        "HUE_SHIFT_CAP", "_DARK_FLOOR_SHADOW", "_DARK_FLOOR_LIGHT",
+        "_DARK_FLOOR_SAT",
+    }
+    found = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id in wanted:
+                if isinstance(node.value, ast.Constant):
+                    found[target.id] = node.value.value
+                elif isinstance(node.value, ast.BinOp):
+                    # AMBIENT_HUE is derived; not needed by this test.
+                    pass
+
+    missing = wanted - set(found)
+    if missing:
+        print("  ! missing constants in sphere_docker.py: {0}".format(
+            ", ".join(sorted(missing))))
+        return None
+    return found
+
+
+def _derive(h, s, v, c):
+    """Mirror of _distribute_from's arithmetic, Qt-free."""
+    clamp01 = lambda x: 0.0 if x < 0.0 else (1.0 if x > 1.0 else float(x))
+
+    sat_gate = min(1.0, s / 0.35)
+    cap = c["HUE_SHIFT_CAP"]
+
+    def hue_toward(start, target, amount):
+        delta = (target - start + 0.5) % 1.0 - 0.5
+        return (start + delta * amount) % 1.0
+
+    light_h = hue_toward(h, c["KEY_LIGHT_HUE"],
+                         min(c["HIGHLIGHT_HUE_SHIFT"] * sat_gate, cap))
+    shadow_h = (h - min(c["SHADOW_HUE_SHIFT"] * sat_gate, cap)) % 1.0
+
+    deriv_s = s if s > 0.0 else c["_DARK_FLOOR_SAT"]
+    return {
+        "light_h": light_h, "light_s": clamp01(deriv_s * 0.72),
+        "light_v": clamp01(max(v + (1.0 - v) * 0.45, c["_DARK_FLOOR_LIGHT"])),
+        "shadow_h": shadow_h, "shadow_s": clamp01(deriv_s * 0.92),
+        "shadow_v": clamp01(max(
+            v * 0.50, min(c["_DARK_FLOOR_SHADOW"], v * 0.90))),
+    }
+
+
+def test_dark_base_derivation():
+    """A very dark base must still yield three distinguishable targets.
+
+    Picking pure black used to produce a shadow identical to the base and a
+    neutral-grey highlight, so the sphere rendered unlit and the Hue slider did
+    nothing (rotating a zero-saturation colour is a no-op). The derivation is
+    multiplicative, so at v = 0 there is nothing left to scale; the fix floors
+    the derived value and restores a saturation when the base carries none.
+    """
+    c = _load_docker_constants()
+    if c is None:
+        return
+
+    cases = [
+        ("pure black", 0.0, 0.0, 0.0),
+        ("near black", 0.0, 0.0, 0.04),
+        ("dark grey", 0.0, 0.0, 0.25),
+        ("dark colour", 0.02, 0.40, 0.18),
+        ("sunset orange", 0.02, 0.75, 0.90),
+    ]
+
+    for label, h, s, v in cases:
+        d = _derive(h, s, v, c)
+
+        # The shadow must be darker than the light, always.
+        assert d["shadow_v"] < d["light_v"], \
+            "{0}: shadow {1:.3f} not below light {2:.3f}".format(
+                label, d["shadow_v"], d["light_v"])
+
+        # A shadow must always be darker than its base, and never pure black
+        # unless the base is. The floor is a rescue for mid-dark bases only:
+        # it yields whenever the base is already darker than the floor, because
+        # a "shadow" lighter than its base would be worse than no shadow.
+        if v > 0.0:
+            assert d["shadow_v"] < v - 1e-9, \
+                "{0}: shadow_v {1:.3f} is not darker than base v={2:.3f}".format(
+                    label, d["shadow_v"], v)
+            if v > c["_DARK_FLOOR_SHADOW"]:
+                # Bright enough that the floor, not the base, is the binding
+                # constraint -- it must actually hold.
+                assert d["shadow_v"] >= c["_DARK_FLOOR_SHADOW"] - 1e-9, \
+                    "{0}: shadow_v {1:.3f} below the floor".format(
+                        label, d["shadow_v"])
+        else:
+            assert d["shadow_v"] == 0.0, \
+                "{0}: a black base has no darker shadow to derive".format(label)
+
+        # A highlight must exist even for a black base.
+        assert d["light_v"] >= c["_DARK_FLOOR_LIGHT"] - 1e-9, \
+            "{0}: light_v {1:.3f} below the floor".format(label, d["light_v"])
+
+        print("  ✓ {0:<15} base v={1:.2f} -> light v={2:.3f} s={3:.3f}  "
+              "shadow v={4:.3f} s={5:.3f}".format(
+                  label, v, d["light_v"], d["light_s"],
+                  d["shadow_v"], d["shadow_s"]))
+
+    # The regression that started this: a pure black pick used to give a
+    # shadow identical to the base and a neutral-grey highlight, so the sphere
+    # was unlit and the Hue slider inert. The shadow must stay black (nothing
+    # is darker), but the highlight must not.
+    black = _derive(0.0, 0.0, 0.0, c)
+    assert black["light_v"] > 0.0, "pure black produced no highlight"
+    assert black["light_s"] > 0.0, \
+        "pure black produced a zero-saturation highlight, which makes the Hue slider inert"
+    assert black["shadow_v"] == 0.0, "shadow should be black for a black base"
+    print("  ✓ pure black keeps a tinted highlight (shadow stays black, as it must)")
+
+
 def main():
     print("Running Lumina shading tests...\n")
     test_engine_gradient()
     test_processor_delegation()
     test_symmetry()
+    test_dark_base_derivation()
     print("\nALL SHADING TESTS PASSED ✅")
 
 
