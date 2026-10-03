@@ -18,6 +18,8 @@ from PyQt5.QtGui import (QBrush, QColor, QLinearGradient, QPainter, QPen,
 from PyQt5.QtWidgets import (QCheckBox, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
                              QSlider, QVBoxLayout, QWidget)
 
+from .tooltip import set_tooltip
+
 
 # ---------------------------------------------------------------------------
 # Accent color palette — one tint per control family (Blender/Substance look)
@@ -373,8 +375,8 @@ class SettingsPanel(QWidget):
 
     QUALITY = (("Low", 128), ("Med", 200), ("High", 288))
 
-    def __init__(self, azimuth: int = 300, elevation: int = 45,
-                 quality: int = 200, highlight_size: int = 99, parent=None):
+    def __init__(self, azimuth: int = 295, elevation: int = 70,
+                 quality: int = 200, highlight_size: int = 100, parent=None):
         super().__init__(parent, Qt.Popup)
         self.setStyleSheet(
             "QWidget { background-color: #343941; color: #e2e6ef; }"
@@ -399,9 +401,9 @@ class SettingsPanel(QWidget):
         # Advanced "Specular" row but in the direction a painter thinks: up
         # means a bigger, softer highlight. Kept in sync with that row by the
         # docker, since two sliders own one engine value.
-        self.highlight_size = self._add_slider(root, "Light azimuth size",
+        self.highlight_size = self._add_slider(root, "Highlight size",
                                                 0, 100, highlight_size)
-        self.highlight_size.setToolTip("Highlight size on the orb")
+        set_tooltip(self.highlight_size, "Highlight size on the orb")
 
         qrow = QHBoxLayout()
         qrow.setSpacing(4)
@@ -432,7 +434,7 @@ class SettingsPanel(QWidget):
         # on Qt rendering long tooltips as screen-wide banners.
         self.apply_btn = QPushButton("Use base color as brush")
         self.apply_btn.setCursor(Qt.PointingHandCursor)
-        self.apply_btn.setToolTip("Send the base color to Krita's brush color")
+        set_tooltip(self.apply_btn, "Send the base color to Krita's brush color")
         self.apply_btn.setStyleSheet(
             "QPushButton { background-color: #3b414a; color: #ccd5e2; "
             "border: 1px solid rgba(255,255,255,60); border-radius: 5px; "

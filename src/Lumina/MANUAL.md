@@ -3,6 +3,13 @@
 A 3D color sphere for studying how light, shadow and base color interact, and
 for picking colors out of your artwork.
 
+## Installing
+
+Download the release `.zip` file. In Krita, go to **Tools → Scripts → Import
+Python Plugin from File** and select the `.zip` — import it directly, no need
+to extract anything (manual extraction into the plugins folder also works).
+Then restart Krita.
+
 Enable it in Krita: **Settings → Configure Krita → Python Plugin Manager**, tick
 **Lumina**, then open it via **View → Dock Widgets → Lumina**.
 
@@ -14,6 +21,11 @@ Real objects are never lit by "white light onto a flat color". A sphere shows yo
 what happens when a light color, a shadow color and a base color are combined,
 so you can choose a palette that reads as a lit object rather than three unrelated
 swatches.
+
+Renderer model: Shadow → Base → Light sets the surface tone by light angle,
+then specular/highlight, rim and glow are added, then display transforms
+(contrast, saturation/Tone, brightness) and tone mapping produce the final color.
+The highlight color feeds the specular hotspot only, not the light-side surface.
 
 The core rule of this tool:
 
@@ -28,10 +40,10 @@ The core rule of this tool:
 
 | Control | What it does |
 |---|---|
-| **Gear** (left) | Opens **Settings**: light direction, render quality, sampler toggle, and *Reset all*. |
+| **Gear** (left) | Opens **Settings**: light direction, render quality, sampler toggle, and *Reset all*. Lights up while the popup is open. |
 | **Left color block** | The **original** color. Click it to revert the active color back to it. |
 | **Right color block** | The **active** color — what you are editing or what you last picked. Click it to commit it as the new original. |
-| **Eyedropper** (right) | Activates Krita's **Color Sampler** tool so you can click any pixel on the canvas. |
+| **Eyedropper** (right) | Activates Krita's **Color Sampler** tool so you can click any pixel on the canvas. Lights up while the sampler is active. |
 
 The two color blocks are a *split color preview*: the left never changes on its
 own, and the right always shows the color currently in play. They only diverge
@@ -49,17 +61,28 @@ shows the exact color being sampled, and the RGB value appears underneath.
   change.
 - Picks only register **on the sphere** — the corners outside the disc are ignored.
 
+### The lamp
+
+Directly above the sphere, four icons choose the lamp model driving the light:
+
+| Icon | Meaning |
+|---|---|
+| **Haloed bulb** | **Point** — nearby lamp; brightness falls off with distance. |
+| **Ring with rays** | **Sun** — distant parallel light; no falloff. |
+| **Cone** | **Spot** — cone beam with a soft edge. |
+| **Panel** | **Area** — broad panel; soft wrap. |
+
 ### Target dots
 
-Three small icons pick which color the Hue and Saturation sliders edit:
+Below the sphere, three small icons pick which color the Hue and Saturation sliders edit. They share one visual language — a dark-to-bright progression on the same circle:
 
 | Dot | Meaning |
 |---|---|
-| **Crescent moon** | **Shadow** — the hue of the darkest areas. |
-| **Droplet** | **Base** — the color of the object. |
-| **Sun** | **Light** — the highlight color; also drives how bright the lit side gets. |
+| **Half-dark circle** | **Shadow** — the hue of the darkest areas. |
+| **Plain ring** | **Base** — the color of the object. |
+| **Ring with rays** | **Light** — the highlight color; also drives how bright the lit side gets. |
 
-The selected dot has a light ring around it.
+The selected target shows on its **color swatch** beside the icon, which grows slightly and takes a white rim. The icons themselves never change.
 
 ### Sliders
 
@@ -67,7 +90,9 @@ The selected dot has a light ring around it.
 |---|---|---|
 | **Hue** | 0–359 | Changes the hue of the **selected target**. Fixed rainbow track. |
 | **Saturation** | 0–100 | Changes the saturation of the selected target. The track re-renders as grey → full color at the current hue. |
+| **Light** | 0–100 | Brightness of the **base** target only; hidden for shadow and light, which are derived from the base. |
 | **Contrast** | 0–200, default 100 (middle) | Controls how sharply the light falls off into shadow on the orb. 100 is neutral -- below or above that, tone mapping reshapes the falloff. It does **not** change a color. |
+| **Exposure** | 0–200, default 100 | Scene light level: scales Sun, Point, Spot and Area together. Mirrors the Advanced **Intensity** row. |
 
 ### Advanced (collapsed)
 
@@ -77,7 +102,7 @@ not fit, so nothing spills out over the dockers below it:
 | Control | What it does |
 |---|---|
 | **Base Level** | Overall brightness of the base color, preserving hue and saturation. |
-| **Intensity** | Brightness of the main light. |
+| **Intensity** | Brightness of the main light. Normalized relative scale: 100% = reference illuminance 1.0 at light distance 3; 200% = 2.0 (linear). Relative rendering units, not lux/lumens. |
 | **Ambient** | Fill light in the shadowed areas; higher values soften the shadow. |
 | **Specular** | Width of the highlight. Low is a broad diffuse wash, high a tight bright spot. |
 | **Diffuse** | Softness of the highlight's falloff. High spreads it into a wide, gentle sheen; low keeps it a compact bright spot. Pairs with **Specular**: that sets how wide the highlight is, this sets how softly it fades. |
@@ -87,8 +112,8 @@ not fit, so nothing spills out over the dockers below it:
 
 ### Presets
 
-One-click looks, above the Advanced section. Each sets the highlight color,
-lighting sliders and mixer mode together:
+One-click looks flanking the orb, three per side. Each sets the highlight color,
+lighting sliders and mixer mode together (never the target colors):
 
 | Button | What it does |
 |---|---|
@@ -142,7 +167,7 @@ Sampler, the palette, or the Color Selector docker.
 |---|---|
 | **Light azimuth** | Rotates the main light around the sphere, 0–359°. |
 | **Light height** | Raises and lowers the light, 0–90°. |
-| **Light azimuth size** | Highlight size on the orb, 0–100. Up means a bigger, softer highlight. Drives the same sharpness as the Advanced **Specular** row, so the two stay in sync. |
+| **Highlight size** | Highlight size on the orb, 0–100. Up means a bigger, softer highlight. Drives the same sharpness as the Advanced **Specular** row, so the two stay in sync. |
 | **Quality** | Render grid size. *Low* is smoothest while dragging, *High* is finest. |
 | **Show color cursor** | Show or hide the ring that follows the pointer over the orb. It marks the exact pixel being read and previews that color; it does not magnify. |
 | **Use base color as brush** | Sends the **base color** to Krita's foreground. Use it after editing with the sliders, since slider edits do not touch the brush. |
@@ -152,7 +177,7 @@ Sampler, the palette, or the Color Selector docker.
 ### Saved settings
 
 Your setup is written to a plain-text file and restored automatically the next
-time Krita opens: the three target colors, the light direction, highlight
+time Krita opens: the three target colors, the lamp model, the light direction, highlight
 size, quality, sampler visibility, and every slider (contrast, intensity,
 ambient, specular, diffuse, glow, tone, base level and the mixer mode). Nothing is lost if Krita
 crashes, because each change is saved as you make it.

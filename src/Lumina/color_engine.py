@@ -1,624 +1,862 @@
-"""color_engine.py — Pure-Python lighting/shading engine (no Qt, no Krita).
+"""Pure-Python sphere geometry and lighting engine for the Lumina Krita plugin.
 
-This module is the *heart* of Lumina. It contains ZERO dependencies on
-PyQt5 or the ``krita`` module, so it can be unit-tested anywhere: on the host,
-in CI, inside the Krita flatpak, or in any Python 3 interpreter.
+The renderer is deliberately split into two layers:
 
-The engine models a single directional light striking a hemisphere and returns
-per-pixel RGB triples (0-255). It implements an extended Phong model:
+1. A mathematically correct projected unit sphere supplies the surface normal,
+   visibility mask, and antialiased coverage.
+2. A lighting stage computes Blender-like Point, Sun, Spot, and Area behavior,
+   then applies the artist-controlled shadow/base/light colors used by Lumina.
 
-    C = base + diffuse*base*light_color*intensity     # light-tinted diffuse
-      + ambient_color * ambient                       # ambient fill
-      + specular_highlight                             # Phong specular
-      then tone-mapped (contrast) + saturation-adjusted
-
-Coordinate convention (matches the original engine exactly):
-    The sphere is drawn in an image where the left edge is the fully shaded
-    side and the right edge is the fully lit side. For each pixel we place it on
-    a unit hemisphere:
-
-        x = -1 + 2 * col / (n-1)     # horizontal, -1 .. +1
-        y = -1 + 2 * row / (n-1)     # vertical,   -1 .. +1
-        z = sqrt(max(0, 1 - x*x - y*y))
-
-    Surface normal N = normalize(x, y, z)  (the hemisphere surface faces outward).
+All lighting arithmetic is performed in linear RGB. QColor values arrive in
+sRGB space at the processor boundary and are converted there before being sent
+into this engine. The engine itself has no Qt dependency.
 """
 
 import math
 from typing import List, Sequence, Tuple
 
-# A color is a plain (r, g, b) triple of ints in 0..255. Keeping it as tuples
-# means this module never imports QImage/QColor and stays framework-agnostic.
-RGB = Tuple[int, int, int]
 
-
-# ---------------------------------------------------------------------------
-# Small helpers
-# ---------------------------------------------------------------------------
-def _clamp(value: float, lo: int = 0, hi: int = 255) -> int:
-    """Clamp ``value`` into the inclusive integer range [lo, hi]."""
-    if value < lo:
-        return lo
-    if value > hi:
-        return hi
-    return int(round(value))
-
-
-def _rgb_from_floats(r: float, g: float, b: float) -> RGB:
-    """Convert normalized (0..1) floats to clamped 0..255 ints."""
-    return (
-        min(255, max(0, round(r * 255))),
-        min(255, max(0, round(g * 255))),
-        min(255, max(0, round(b * 255))),
-    )
-
-
-def _lerp(a: float, b: float, t: float) -> float:
-    """Linear interpolation between ``a`` and ``b`` at parameter ``t``."""
-    return a + (b - a) * t
-
-
-# ---------------------------------------------------------------------------
-# Shading engine
-# ---------------------------------------------------------------------------
-SHADOW_FALLOFF = 1.35    # shadow blend exponent; higher = shadow stays local
-DIFFUSE_FLOOR = 0.12     # dimmest the unlit side gets from the diffuse term
-DIFFUSE_GAMMA = 0.55     # <1 lifts the midtones so the base colour is reached
-TINT_STRENGTH = 0.55     # how far the lit side is tinted toward the light colour
-SPEC_MAX = 0.50          # ceiling on the specular: a broad wash, not a hotspot
-# The knee is exposed per-engine (ColorEngine.spec_knee) so the UI can drive it.
-# These are the two ends of the "Diffuse" slider's range: a low knee spreads the
-# sheen, a high knee keeps it tight.
-SPEC_KNEE_MIN = 0.10     # slider at 100 -- very diffuse
-SPEC_KNEE_MAX = 1.00     # slider at 0   -- tight, close to the old clamp
-# The ceiling is applied as a soft shoulder rather than a hard clamp. Clamping
-# made every pixel whose raw sheen exceeded SPEC_MAX sit at exactly the ceiling,
-# which produced a flat-topped plateau ~900px across at the default shininess
-# and a hard step where the plateau ended -- the highlight read as a disc laid
-# on the sphere rather than as a sheen. This rational curve
-#
-#     spec = SPEC_MAX * s * (k + 1) / (s + k)
-#
-# passes through the same origin and the same peak (s=1 -> SPEC_MAX) but never
-# saturates, so there is no plateau and no discontinuity in the gradient. It
-# also redistributes the plateau's energy outward, widening the sheen without
-# changing overall brightness. k controls the shoulder: smaller k is a more
-# aggressive rolloff. Swept against the 256px render, k=0.35 holds the peak at
-# 0.50 while the flat core falls from ~900px to ~55px and the >=50% area grows
-# from 12.7% to 14.1% of the disc, with mean sheen within 3% of the old value.
-SPEC_KNEE = 0.35
-# --- Rim / Fresnel ---------------------------------------------------------
-# The Schlick approximation gives R = R0 + (1 - R0)(1 - cos(theta))^5. Viewed
-# head-on, cos(theta) is the surface normal's z, and z runs from 1 at the centre
-# of the disc to 0 at the silhouette, so the rim term is simply (1 - z)^5. The
-# exponent of 5 is the standard Fresnel falloff, not a free parameter: it is
-# what keeps the effect confined to a narrow band at the edge instead of
-# washing across the whole sphere.
-RIM_POWER = 5.0
-# Measured: below about 0.60 the edge is still darker than the band just inside
-# it, so the sphere keeps its dark outline. 0.65 is the first value at which the
-# silhouette reads as lit and the shadow pools inside the form.
-# 0.65 was enough to beat the interior but it read as a glowing outline drawn
-# round the whole sphere, which the reference does not have -- there the edge
-# brightness simply follows the light. Kept low, just enough to keep the
-# silhouette from going darker than the shadow pooled inside it.
-RIM_LIGHT = 0.22         # additive rim, tinted by the highlight colour
-# Zero. Suppressing the shadow toward the silhouette to make the edge read as
-# lit produced a dark band just inside a lighter rim, because the shadow weight
-# is largest exactly at the silhouette and lifting it there only moved the
-# minimum inward. The reference has no such band.
-RIM_SHADOW_LIFT = 0.0
+Color = Tuple[float, float, float]
+Pixel = Tuple[int, int, int]
+Normal = Tuple[float, float, float]
 
 
 class ColorEngine:
-    """Stateless-ish lighting engine.
+    """Generate a shaded, front-facing 3D sphere as an RGB pixel grid."""
 
-    The constructor sets sane defaults; the widget layer mutates the public
-    attributes (or calls the ``set_*`` helpers) and then calls
-    :meth:`render` to get fresh pixel data.
+    LIGHT_TYPES = ("Point", "Sun", "Spot", "Area")
+    MIXER_MODES = ("Blended", "Additive", "Multiplicative")
 
-    Attributes / set_* methods mirror the historical Krita plugin API so the
-    widget code can be written once and work against either engine instance.
-    """
+    # The old engine used 900 as a raw point-light value. That made the
+    # inverse-square result several times larger than one and forced the output
+    # through aggressive clipping/rolloff. Lumina instead uses a calibrated
+    # reference flux: at LIGHT_DISTANCE the illuminance is exactly 1.0 before
+    # the user-controlled intensity multiplier.
+    LIGHT_DISTANCE = 3.0
+    REFERENCE_POINT_FLUX = 4.0 * math.pi * (LIGHT_DISTANCE ** 2)
+    REFERENCE_AREA_POWER = REFERENCE_POINT_FLUX
+
+    # Blender-like spot defaults. spot_size is a full cone angle; the shader
+    # compares against the corresponding half-angle around the center axis.
+    # 35deg/0.25 keeps the sphere edge in penumbra so Spot differs from Point.
+    # Sphere angular radius at light distance 3 is asin(1/3)=19.47deg; the old
+    # 60deg/0.35 put the whole visible sphere inside the inner cone.
+    SPOT_OUTER_DEG = 35.0
+    SPOT_BLEND = 0.25
+
+    # Nominal area emitter size. NOTE: the current center-sampled approximation
+    # divides by area then multiplies back, so AREA_SIZE has no intensity
+    # effect yet. Kept at 2.0 as the future default for true multi-sample
+    # Square/Rectangle/Disk integration (spec spread, shadow softness).
+    AREA_SIZE = 2.0
+
+    AMBIENT_SCALE = 1.0
+    AMBIENT_SKY = (0.72, 0.78, 0.92)
+    AMBIENT_SKY_MIX = 0.18
+
+    # Artistic defaults. These values are intentionally moderate because the
+    # point-light energy is now normalized at the reference distance.
+    DIFFUSE_FLOOR = 0.10
+    DIFFUSE_GAMMA = 0.85
+    WRAP_DIFFUSE = 0.35
+
+    SPEC_MAX = 0.24
+    # Immutable renderer default. Live state is self.spec_max (property).
+    SPEC_MAX_DEFAULT = 0.24
+    SPEC_TIGHT = 0.90
+    SPEC_KNEE = 0.22
+    SPEC_KNEE_MIN = 0.02
+    SPEC_KNEE_MAX = 0.95
+
+    RIM_POWER = 5.0
+    RIM_LIGHT = 0.14
+    RIM_TOP_WEIGHT = 0.35
+    RIM_BOTTOM_GAIN = 1.0
+    RIM_SHADOW_LIFT = 0.0
+
+    DARK_FALLOFF = 0.80
+    DARK_WASH = 0.06
+    DARK_AMBIENT_FLOOR = 0.25
+
+    DARK_GRAIN_BOOST = 2.0
+    DARK_GRAIN_ABS = 0.05
+    GRAIN_DEPTH = 0.12
 
     def __init__(self, resolution: int = 256):
-        self.resolution = max(8, min(resolution, 512))
+        self.resolution = max(8, min(int(resolution), 512))
 
-        # --- Lighting state -------------------------------------------------
-        self.ambient = 0.1                      # 0.0 - 1.0
-        self.light_azimuth_deg = 300.0          # degrees, 0..360
-        # 45 degrees: half of the gear slider's 0-90 range, so the Light height
-        # handle opens in the middle. Saved settings and presets override this.
-        self.light_elevation_rad = math.pi / 4  # radians, 0..pi/2
-        # Specular sharpness. Measured on the rendered disc, the highlight's
-        # area scales roughly as 1/shininess: 30 -> 223px, 14 -> 468px, 10 -> 651px
-        # against a disc of ~26,500px. At 30 the highlight covered under 1% of the
-        # sphere and read as a small white dot; the reference is a broad soft wash
-        # with no distinct hotspot at all, which needs a far lower exponent still.
-        # Squared after the power, so the effective exponent is 2 * this. 4 was
-        # still rl**8 and read as a tight lobe; the reference spreads its
-        # highlight across a large part of the upper hemisphere.
-        self.shininess = 1.6                     # specular sharpness
-        # Specular shoulder. See the SPEC_KNEE comment above; the UI's "Diffuse"
-        # slider maps onto this. 0.35 is the measured sweet spot.
-        self.spec_knee = SPEC_KNEE
+        # User-facing controls.
+        self.ambient = 0.10
+        self.light_azimuth = 295.0
+        self.light_elevation = 70.0
+        self.shininess = 8.0
+        self.spec_knee = 0.22
+        # Live specular ceiling. SPEC_MAX/SPEC_MAX_DEFAULT is the immutable
+        # renderer default; spec_max property is the single source of truth.
+        self._spec_max = float(self.SPEC_MAX_DEFAULT)
 
-        # --- Color state (normalized 0..1) ----------------------------------
-        # The ambient fill is deliberately neutral. It is a flat lift added to
-        # every pixel, so a blue-biased tint does not merely cool the shadows --
-        # in the dark areas, where the base colour has almost no strength left,
-        # that lift is most of what is there and it took over entirely: the
-        # shadow of an orange sphere came out blue-violet, with blue-minus-red
-        # reaching +0.11. Keeping it neutral lets the derived shadow colour show
-        # through instead.
-        self.ambient_color = (0.88, 0.88, 0.88)
-        self.shadow_color = (0.1569, 0.1569, 0.2353)    # ~ (40,40,60)
-        self.highlight_color = (1.0, 1.0, 1.0)           # white specular
-        self.light_color = (1.0, 1.0, 1.0)             # tint of the lit side (white = neutral)
+        self.ambient_color: Color = (0.88, 0.88, 0.88)
+        self.shadow_color: Color = (0.1569, 0.1569, 0.2353)
+        self.highlight_color: Color = (1.0, 1.0, 1.0)
+        self.light_color: Color = (1.0, 1.0, 1.0)
 
-        # --- Intensity / effect state --------------------------------------
-        self.light_intensity = 1.0               # 0.0 - 2.0
-        # 1.0 = the tone-mapping no-op, and the slider's midpoint: the Contrast
-        # row spans 0-200, so the engine default lands the handle in the middle
-        # at 100. Saved settings and presets override this on load.
+        self.light_intensity = 1.0
+        self.light_type = "Point"
+
+        self.grain = 0.0
+        self.smooth = 2.0
         self.contrast = 1.0
-        self.brightness = 1.0                     # 0.0 - 2.0
-        self.saturation = 1.0                     # 0.0 - 2.0
+        # Hidden display-stage multiplier kept for API/preset compatibility.
+        # The user-facing "Tone" control maps to saturation, not brightness.
+        self.brightness = 1.0
+        self.saturation = 1.0
 
-        # --- Mixer / glow ---------------------------------------------------
-        self.mixer_mode = "Blended"               # Additive | Multiplicative | Blended
-        self.glow_intensity = 0.0                 # 0.0 - 1.0
-        self.glow_radius = 10.0                   # 1 - 30
+        self.mixer_mode = "Blended"
+        self.glow_intensity = 0.0
+        self.glow_radius = 10.0
 
-        # Recompute the cached geometry + shading on construction.
-        self._generate_normal_grid()
+        self._normal_grid: List[List[Normal]] = []
+        self._mask_grid: List[List[bool]] = []
+        self._coverage_grid: List[List[float]] = []
+        self._grid_width = 0
+        self._grid_height = 0
+
+        self._light_vector = (0.0, 0.0, 1.0)
+        self._compute_shading()
+        self._generate_geometry(self.resolution, self.resolution)
+
+    # ------------------------------------------------------------------
+    # Numeric helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
+        return lo if value < lo else hi if value > hi else value
+
+    @classmethod
+    def _smoothstep(cls, edge0: float, edge1: float, x: float) -> float:
+        if edge0 == edge1:
+            return 1.0 if x >= edge1 else 0.0
+        t = cls._clamp((x - edge0) / (edge1 - edge0))
+        return t * t * (3.0 - 2.0 * t)
+
+    @staticmethod
+    def _lerp(a: Color, b: Color, t: float) -> Color:
+        return (
+            a[0] + (b[0] - a[0]) * t,
+            a[1] + (b[1] - a[1]) * t,
+            a[2] + (b[2] - a[2]) * t,
+        )
+
+    @staticmethod
+    def _add(a: Color, b: Color) -> Color:
+        return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+
+    @staticmethod
+    def _mul(a: Color, s: float) -> Color:
+        return (a[0] * s, a[1] * s, a[2] * s)
+
+    @staticmethod
+    def _mul_color(a: Color, b: Color) -> Color:
+        return (a[0] * b[0], a[1] * b[1], a[2] * b[2])
+
+    @staticmethod
+    def _normalize3(x: float, y: float, z: float) -> Normal:
+        length = math.sqrt(x * x + y * y + z * z)
+        if length <= 1.0e-12:
+            return (0.0, 0.0, 1.0)
+        return (x / length, y / length, z / length)
+
+    # ------------------------------------------------------------------
+    # Color-space helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _srgb_to_linear_component(value: float) -> float:
+        value = max(0.0, min(1.0, float(value)))
+        if value <= 0.04045:
+            return value / 12.92
+        return ((value + 0.055) / 1.055) ** 2.4
+
+    @staticmethod
+    def _linear_to_srgb_component(value: float) -> float:
+        value = max(0.0, float(value))
+        if value <= 0.0031308:
+            return 12.92 * value
+        return 1.055 * (value ** (1.0 / 2.4)) - 0.055
+
+    @classmethod
+    def _to_linear(cls, color: Sequence[float]) -> Color:
+        return (
+            cls._srgb_to_linear_component(color[0]),
+            cls._srgb_to_linear_component(color[1]),
+            cls._srgb_to_linear_component(color[2]),
+        )
+
+    @classmethod
+    def _from_linear(cls, color: Color) -> Color:
+        return (
+            cls._linear_to_srgb_component(color[0]),
+            cls._linear_to_srgb_component(color[1]),
+            cls._linear_to_srgb_component(color[2]),
+        )
+
+    # ------------------------------------------------------------------
+    # State setters
+    # ------------------------------------------------------------------
+    def _coerce_color(self, color: Sequence[float]) -> Color:
+        values = tuple(float(c) for c in color)
+        if len(values) != 3:
+            raise ValueError("Color must contain exactly three channels")
+        # Accept either normalized floats or integer RGB values.
+        if any(abs(v) > 1.0 for v in values):
+            values = tuple(v / 255.0 for v in values)
+        return (
+            self._clamp(values[0]),
+            self._clamp(values[1]),
+            self._clamp(values[2]),
+        )
+
+    def set_ambient_color(self, color) -> None:
+        self.ambient_color = self._coerce_color(color)
+        self._compute_shading()
+
+    def set_shadow_color(self, color) -> None:
+        self.shadow_color = self._coerce_color(color)
+        self._compute_shading()
+
+    def set_highlight_color(self, color) -> None:
+        self.highlight_color = self._coerce_color(color)
+        self._compute_shading()
+
+    def set_light_color(self, color) -> None:
+        self.light_color = self._coerce_color(color)
+        self._compute_shading()
+
+    def set_light_angle(self, azimuth, elevation=None) -> None:
+        self.light_azimuth = float(azimuth) % 360.0
+        if elevation is not None:
+            self.light_elevation = self._clamp(float(elevation), 0.0, 90.0)
+        self._compute_shading()
+
+    def set_light_elevation(self, elevation) -> None:
+        self.light_elevation = self._clamp(float(elevation), 0.0, 90.0)
+        self._compute_shading()
+
+    # Backward-compat aliases for the pre-fix docker (which used
+    # light_azimuth_deg degrees + light_elevation_rad radians).
+    @property
+    def light_azimuth_deg(self) -> float:
+        return float(self.light_azimuth)
+
+    @light_azimuth_deg.setter
+    def light_azimuth_deg(self, value) -> None:
+        self.light_azimuth = float(value) % 360.0
+        self._compute_shading()
+
+    @property
+    def light_elevation_rad(self) -> float:
+        return math.radians(float(self.light_elevation))
+
+    @light_elevation_rad.setter
+    def light_elevation_rad(self, value) -> None:
+        self.light_elevation = self._clamp(math.degrees(float(value)), 0.0, 90.0)
+        self._compute_shading()
+
+    def set_ambient(self, value) -> None:
+        self.ambient = self._clamp(float(value))
+        self._compute_shading()
+
+    def set_light_intensity(self, value) -> None:
+        self.light_intensity = max(0.0, float(value))
+        self._compute_shading()
+
+    def set_shininess(self, value) -> None:
+        self.shininess = max(1.0, min(64.0, float(value)))
+        self._compute_shading()
+
+    @property
+    def spec_max(self) -> float:
+        return float(getattr(self, "_spec_max", self.SPEC_MAX_DEFAULT))
+
+    @spec_max.setter
+    def spec_max(self, value) -> None:
+        self._spec_max = max(0.0, min(1.0, float(value)))
+        self._compute_shading()
+
+    def set_spec_max(self, value) -> None:
+        # Per-preset specular ceiling. Baseline 0.24; Matte ~0.10, Neon ~0.28.
+        self.spec_max = value
+
+    def set_spec_knee(self, value) -> None:
+        self.spec_knee = max(self.SPEC_KNEE_MIN, min(self.SPEC_KNEE_MAX, float(value)))
+        self._compute_shading()
+
+    def set_contrast(self, value) -> None:
+        self.contrast = max(0.0, float(value))
+        self._compute_shading()
+
+    def set_brightness(self, value) -> None:
+        self.brightness = max(0.0, float(value))
+        self._compute_shading()
+
+    def set_saturation(self, value) -> None:
+        self.saturation = max(0.0, float(value))
+        self._compute_shading()
+
+    def set_light_type(self, value) -> None:
+        value = str(value)
+        self.light_type = value if value in self.LIGHT_TYPES else "Point"
+        self._compute_shading()
+
+    def set_mixer_mode(self, mode) -> None:
+        mode = str(mode)
+        self.mixer_mode = mode if mode in self.MIXER_MODES else "Blended"
+        self._compute_shading()
+
+    def set_glow_intensity(self, value) -> None:
+        self.glow_intensity = max(0.0, float(value))
+        self._compute_shading()
+
+    def set_glow_radius(self, value) -> None:
+        self.glow_radius = max(0.5, float(value))
+        self._compute_shading()
+
+    def set_grain(self, value) -> None:
+        self.grain = max(0.0, float(value))
+        self._compute_shading()
+
+    def set_smooth(self, value) -> None:
+        self.smooth = max(0.0, min(2.0, float(value)))
         self._compute_shading()
 
     # ------------------------------------------------------------------
     # Geometry
     # ------------------------------------------------------------------
-    def _generate_normal_grid(self) -> None:
-        """Pre-compute unit surface normals for the visible hemisphere."""
-        n = self.resolution
-        step = 2.0 / (n - 1) if n > 1 else 2.0
-        normals: List[List[Tuple[float, float, float]]] = []
+    def _generate_geometry(self, width: int, height: int) -> None:
+        width = max(2, int(width))
+        height = max(2, int(height))
+
+        normals: List[List[Normal]] = []
         masks: List[List[bool]] = []
-        for row in range(n):
-            nrow: List[Tuple[float, float, float]] = []
-            mrow: List[bool] = []
-            y = -1.0 + row * step
-            for col in range(n):
-                x = -1.0 + col * step
+        coverage: List[List[float]] = []
+
+        dx = 2.0 / float(width - 1)
+        dy = 2.0 / float(height - 1)
+        pixel_half_diagonal = 0.5 * math.sqrt(dx * dx + dy * dy)
+
+        for row in range(height):
+            y = -1.0 + 2.0 * row / float(height - 1)
+            normal_row: List[Normal] = []
+            mask_row: List[bool] = []
+            coverage_row: List[float] = []
+
+            for col in range(width):
+                x = -1.0 + 2.0 * col / float(width - 1)
                 r2 = x * x + y * y
                 inside = r2 <= 1.0
-                if inside and r2 > 0:
-                    z = math.sqrt(1.0 - r2)
-                    length = math.sqrt(r2 + z * z)
-                    nrow.append((x / length, y / length, z / length))
+
+                if inside:
+                    z2 = max(0.0, 1.0 - r2)
+                    z = math.sqrt(z2)
+
+                    # The exact center is a real sphere point. Its normal is
+                    # +Z, never (0,0,0). This fixes the central-pixel singularity
+                    # in the previous implementation.
+                    normal = self._normalize3(x, y, z)
                 else:
-                    nrow.append((0.0, 0.0, 0.0))
-                mrow.append(inside)
-            normals.append(nrow)
-            masks.append(mrow)
+                    normal = (0.0, 0.0, 0.0)
+
+                radial_distance = math.sqrt(r2)
+                edge_distance = 1.0 - radial_distance
+                coverage_value = self._clamp(
+                    (edge_distance + pixel_half_diagonal)
+                    / max(1.0e-12, 2.0 * pixel_half_diagonal)
+                )
+
+                normal_row.append(normal)
+                mask_row.append(inside)
+                coverage_row.append(coverage_value)
+
+            normals.append(normal_row)
+            masks.append(mask_row)
+            coverage.append(coverage_row)
+
         self._normal_grid = normals
         self._mask_grid = masks
-        # Rim proximity: 0 at the centre of the disc, rising to 1 at the
-        # silhouette. Depends only on geometry, so it is baked once here rather
-        # than recomputed per pixel. z is 1 dead centre and 0 at the edge, so
-        # 1 - z is exactly "how close to the outline is this".
-        rim: List[List[float]] = []
-        for row in range(n):
-            rrow: List[float] = []
-            for col in range(n):
-                if not masks[row][col]:
-                    rrow.append(0.0)
-                else:
-                    rrow.append((1.0 - normals[row][col][2]) ** RIM_POWER)
-            rim.append(rrow)
-        self._rim_grid = rim
-        self._coverage_grid = self._build_coverage_grid()
+        self._coverage_grid = coverage
+        self._grid_width = width
+        self._grid_height = height
 
-    def _build_coverage_grid(self) -> List[List[float]]:
-        """Per-pixel fraction of the pixel that lies inside the silhouette.
+    def _generate_normal_grid(self) -> None:
+        self._generate_geometry(self.resolution, self.resolution)
 
-        The mask is a hard in/out test, so a sphere built from it has a 1-bit
-        edge: every pixel is either fully opaque or fully gone, and the
-        staircase of those steps is what read as a choppy, jagged rim.
-
-        Because the silhouette is a circle centred on the origin, the exact
-        perpendicular distance from a pixel centre at radius ``r`` to the
-        boundary is simply ``1 - r``, independent of the angle. Dividing that by
-        the pixel pitch gives the coverage, which is 1.0 well inside, 0.0 well
-        outside, and fractional in a one-pixel band at the rim. Feeding that into
-        the alpha channel lets Qt blend the edge instead of stepping it.
-        """
-        n = self.resolution
-        step = 2.0 / (n - 1) if n > 1 else 2.0
-        half = step * 0.5
-        grid: List[List[float]] = []
-        clamp = lambda v: 0.0 if v < 0.0 else (1.0 if v > 1.0 else v)
-        for row in range(n):
-            rrow: List[float] = []
-            y = -1.0 + row * step
-            for col in range(n):
-                x = -1.0 + col * step
-                r = math.sqrt(x * x + y * y)
-                rrow.append(clamp((1.0 - r + half) / step))
-            grid.append(rrow)
-        return grid
-
-    def coverage_grid(self) -> List[List[float]]:
-        """Per-pixel silhouette coverage in 0..1 (1 = fully inside)."""
-        return self._coverage_grid
-
-    def _light_direction(self) -> Tuple[float, float, float]:
-        """Return the unit light direction vector."""
-        le = self.light_elevation_rad
-        la = math.radians(self.light_azimuth_deg)
-        lx = math.cos(le) * math.cos(la)
-        ly = math.cos(le) * math.sin(la)
-        lz = math.sin(le)
-        length = math.sqrt(lx * lx + ly * ly + lz * lz)
-        if length == 0:
-            return (0.0, 0.0, 1.0)
-        return (lx / length, ly / length, lz / length)
-
+    # ------------------------------------------------------------------
+    # Light direction cache
+    # ------------------------------------------------------------------
     def _compute_shading(self) -> None:
-        """Pre-compute every per-pixel term that depends only on the light.
+        azimuth = math.radians(self.light_azimuth)
+        elevation = math.radians(self.light_elevation)
+        self._light_vector = self._normalize3(
+            math.cos(elevation) * math.cos(azimuth),
+            math.cos(elevation) * math.sin(azimuth),
+            math.sin(elevation),
+        )
 
-        Three things are baked here instead of being recomputed 40k times per
-        render: the diffuse term, the shadow blend weight ``(1-d)^0.6``, and the
-        normalized reflection vector used by the specular highlight. The last
-        two only depend on the light direction, so they stay valid until the
-        light moves -- which keeps slider drags responsive.
-        """
-        lx, ly, lz = self._light_direction()
-        n = self.resolution
-        grid: List[List[float]] = []
-        shadow_grid: List[List[float]] = []
-        refl_grid: List[List[Tuple[float, float]]] = []
-        max_ = max
-        sqrt = math.sqrt
-        for row in range(n):
-            grow: List[float] = []
-            srow: List[float] = []
-            rrow: List[Tuple[float, float]] = []
-            nrow = self._normal_grid[row]
-            for col in range(n):
-                nx, ny, nz = nrow[col]
-                diffuse = max_(0.0, nx * lx + ny * ly + nz * lz)
-                if diffuse > 1.0:
-                    diffuse = 1.0
-                grow.append(diffuse)
-                srow.append((1.0 - diffuse) ** SHADOW_FALLOFF)
-                # Reflection of the view vector (assumed to be the normal) about
-                # the diffuse-scaled normal, then normalized.
-                rx = 2.0 * nx * diffuse - lx
-                ry = 2.0 * ny * diffuse - ly
-                rz = 2.0 * nz * diffuse - lz
-                rlen = sqrt(rx * rx + ry * ry + rz * rz)
-                if rlen > 0:
-                    inv = 1.0 / rlen
-                    rl = (rx * inv) * lx + (ry * inv) * ly + (rz * inv) * lz
-                    rrow.append(rl if rl > 0.0 else 0.0)
-                else:
-                    rrow.append(0.0)
-            grid.append(grow)
-            shadow_grid.append(srow)
-            refl_grid.append(rrow)
-        self._diffuse_grid = grid
-        self._shadow_grid = shadow_grid
-        self._refl_grid = refl_grid
+        # Keep these historical cache names available for compatibility with
+        # older callers/tests. The actual renderer recomputes point-light
+        # vectors per pixel because a point light is not a constant direction.
+        self._diffuse_cache = []
+        self._shadow_cache = []
+        self._spec_cache = []
+        if self._grid_width and self._grid_height:
+            diffuse: List[List[float]] = []
+            shadow: List[List[float]] = []
+            spec: List[List[float]] = []
+            for row in self._normal_grid:
+                drow: List[float] = []
+                srow: List[float] = []
+                hrow: List[float] = []
+                for nx, ny, nz in row:
+                    if nx == 0.0 and ny == 0.0 and nz == 0.0:
+                        drow.append(0.0)
+                        srow.append(1.0)
+                        hrow.append(0.0)
+                        continue
+                    ndl = max(0.0, nx * self._light_vector[0] + ny * self._light_vector[1] + nz * self._light_vector[2])
+                    hx, hy, hz = self._normalize3(
+                        self._light_vector[0],
+                        self._light_vector[1],
+                        self._light_vector[2] + 1.0,
+                    )
+                    ndh = max(0.0, nx * hx + ny * hy + nz * hz)
+                    drow.append(ndl)
+                    srow.append((1.0 - ndl) ** self.DARK_FALLOFF)
+                    hrow.append(ndh)
+                diffuse.append(drow)
+                shadow.append(srow)
+                spec.append(hrow)
+            self._diffuse_cache = diffuse
+            self._shadow_cache = shadow
+            self._spec_cache = spec
 
-    def mask(self, row: int, col: int) -> bool:
-        """True if pixel ``(row, col)`` lies inside the sphere silhouette."""
-        return self._mask_grid[row][col]
-
-    def mask_grid(self) -> List[List[bool]]:
-        """Return the whole silhouette mask.
-
-        Callers that walk every pixel should take the grid once and index it
-        directly rather than calling :meth:`mask` per pixel.
-        """
-        return self._mask_grid
-
-    # ------------------------------------------------------------------
-    # Setters (mirror the historical Krita plugin API)
-    # ------------------------------------------------------------------
-    def set_light_angle(self, azimuth_deg: float, elevation_rad=None) -> None:
-        if elevation_rad is not None:
-            self.light_elevation_rad = max(0.0, min(math.pi / 2, elevation_rad))
-        self.light_azimuth_deg = max(0.0, min(360.0, azimuth_deg))
+    def _compute_shading_cache(self) -> None:
         self._compute_shading()
 
-    def set_ambient(self, value: float) -> None:
-        self.ambient = max(0.0, min(1.0, value))
+    # ------------------------------------------------------------------
+    # Light implementations
+    # ------------------------------------------------------------------
+    def _point_position(self) -> Normal:
+        return self._light_vector
 
-    def set_ambient_color(self, color: Sequence[float]) -> None:
-        self.ambient_color = tuple(float(c) for c in color)
+    def _point_illuminance(self, surface_x: float, surface_y: float, surface_z: float) -> Tuple[Normal, float]:
+        # Unit sphere is the scene object. The virtual point light sits at the
+        # configured direction and LIGHT_DISTANCE units from the center.
+        lx = self._light_vector[0] * self.LIGHT_DISTANCE
+        ly = self._light_vector[1] * self.LIGHT_DISTANCE
+        lz = self._light_vector[2] * self.LIGHT_DISTANCE
 
-    def set_shadow_color(self, color: Sequence[float]) -> None:
-        self.shadow_color = tuple(float(c) for c in color)
+        vx = lx - surface_x
+        vy = ly - surface_y
+        vz = lz - surface_z
+        distance = math.sqrt(vx * vx + vy * vy + vz * vz)
+        if distance <= 1.0e-6:
+            return (0.0, 0.0, 1.0), 0.0
 
-    def set_highlight_color(self, color: Sequence[float]) -> None:
-        self.highlight_color = tuple(float(c) for c in color)
+        ldir = (vx / distance, vy / distance, vz / distance)
+        flux = self.REFERENCE_POINT_FLUX * self.light_intensity
+        illuminance = flux / (4.0 * math.pi * (distance * distance + 0.01))
+        return ldir, illuminance
 
-    def set_light_color(self, color: Sequence[float]) -> None:
-        """Tint applied to the diffuse (lit) side; white = neutral light."""
-        self.light_color = tuple(float(c) for c in color)
+    def _sun_illuminance(self) -> Tuple[Normal, float]:
+        return self._light_vector, self.light_intensity
 
-    def set_light_intensity(self, value: float) -> None:
-        self.light_intensity = max(0.0, min(2.0, value))
+    def _spot_illuminance(self, surface_x: float, surface_y: float, surface_z: float) -> Tuple[Normal, float]:
+        ldir, point_energy = self._point_illuminance(surface_x, surface_y, surface_z)
 
-    def set_shininess(self, value: float) -> None:
-        self.shininess = max(1.0, min(128.0, value))
+        # The virtual spotlight is aimed at the sphere center. Its axis is the
+        # direction from the light toward the origin, which equals the negative
+        # of the surface-to-light position vector.
+        axis = (-self._light_vector[0], -self._light_vector[1], -self._light_vector[2])
 
-    def set_spec_knee(self, value: float) -> None:
-        """Set the specular shoulder strength (see :data:`SPEC_KNEE`).
+        # ldir points from the surface toward the lamp. The vector from lamp to
+        # surface is therefore -ldir.
+        lamp_to_surface = (-ldir[0], -ldir[1], -ldir[2])
+        theta_cos = axis[0] * lamp_to_surface[0] + axis[1] * lamp_to_surface[1] + axis[2] * lamp_to_surface[2]
 
-        Smaller is more diffuse. Clamped to the range the Diffuse slider covers
-        so a bad value can never produce a flat plateau or a blown-out hotspot.
-        """
-        self.spec_knee = max(SPEC_KNEE_MIN, min(SPEC_KNEE_MAX, value))
+        outer_half = math.radians(self.SPOT_OUTER_DEG * 0.5)
+        inner_half = outer_half * (1.0 - self.SPOT_BLEND)
+        outer_cos = math.cos(outer_half)
+        inner_cos = math.cos(inner_half)
 
-    def set_contrast(self, value: float) -> None:
-        self.contrast = max(0.0, min(3.0, value))
+        if theta_cos <= outer_cos:
+            cone = 0.0
+        elif theta_cos >= inner_cos:
+            cone = 1.0
+        else:
+            cone = self._smoothstep(outer_cos, inner_cos, theta_cos)
 
-    def set_light_elevation(self, elevation_rad: float) -> None:
-        self.light_elevation_rad = max(0.0, min(math.pi / 2, elevation_rad))
-        self._compute_shading()
+        return ldir, point_energy * cone
 
-    def set_brightness(self, value: float) -> None:
-        self.brightness = max(0.0, min(2.0, value))
+    def _area_illuminance(self, surface_x: float, surface_y: float, surface_z: float) -> Tuple[Normal, float]:
+        # Center-point approximation of a square Blender-like area emitter.
+        # The emitter normal faces the origin.
+        lx = self._light_vector[0] * self.LIGHT_DISTANCE
+        ly = self._light_vector[1] * self.LIGHT_DISTANCE
+        lz = self._light_vector[2] * self.LIGHT_DISTANCE
 
-    def set_saturation(self, value: float) -> None:
-        self.saturation = max(0.0, min(2.0, value))
+        vx = lx - surface_x
+        vy = ly - surface_y
+        vz = lz - surface_z
+        distance = math.sqrt(vx * vx + vy * vy + vz * vz)
+        if distance <= 1.0e-6:
+            return (0.0, 0.0, 1.0), 0.0
 
-    def set_mixer_mode(self, mode: str) -> None:
-        if mode in ("Additive", "Multiplicative", "Blended"):
-            self.mixer_mode = mode
+        ldir = (vx / distance, vy / distance, vz / distance)
+        lamp_to_surface = (-ldir[0], -ldir[1], -ldir[2])
+        emitter_normal = (-self._light_vector[0], -self._light_vector[1], -self._light_vector[2])
+        cos_alpha = max(0.0, emitter_normal[0] * lamp_to_surface[0]
+                              + emitter_normal[1] * lamp_to_surface[1]
+                              + emitter_normal[2] * lamp_to_surface[2])
 
-    def set_glow_intensity(self, value: float) -> None:
-        self.glow_intensity = max(0.0, min(1.0, value))
+        area = max(0.001, self.AREA_SIZE * self.AREA_SIZE)
+        power_density = (self.REFERENCE_AREA_POWER * self.light_intensity) / area
+        illuminance = power_density * cos_alpha / (distance * distance + 0.01)
+        # Calibrate the larger area-light denominator back to the same visual
+        # energy scale used by the reference point light.
+        illuminance *= area
+        return ldir, illuminance
 
-    def set_glow_radius(self, value: float) -> None:
-        self.glow_radius = max(1.0, min(30.0, value))
+    def _light_for_surface(self, surface_x: float, surface_y: float, surface_z: float) -> Tuple[Normal, float]:
+        if self.light_type == "Sun":
+            return self._sun_illuminance()
+        if self.light_type == "Spot":
+            return self._spot_illuminance(surface_x, surface_y, surface_z)
+        if self.light_type == "Area":
+            return self._area_illuminance(surface_x, surface_y, surface_z)
+        return self._point_illuminance(surface_x, surface_y, surface_z)
 
     # ------------------------------------------------------------------
-    # Rendering (pure Python, returns RGB tuples)
+    # Artist-controlled tonal color map
     # ------------------------------------------------------------------
-    def render(self, base_color: Sequence[float], width: int, height: int) -> List[List[RGB]]:
-        """Render the shaded sphere.
+    def _tonal_color(self, shadow_linear: Color, base_linear: Color, light_linear: Color, ndl: float) -> Color:
+        # Artistic color zones use raw NdotL (gamma only), NOT the wrapped
+        # value. Wrapped diffuse is for lighting-energy softening; using it
+        # here pushed NdotL=0 to ~52% base, squeezing the shadow target.
+        # Zones: 0.0=shadow, ~0.3=transition, ~0.5=base, ~0.7=transition, 1.0=light.
+        tonal_position = self._clamp(ndl) ** self.DIFFUSE_GAMMA
 
-        :param base_color:   (r, g, b) of the object's base/albedo color (0..1).
-        :param width:        Output image width in pixels.
-        :param height:       Output image height in pixels.
-        :return:             ``height`` rows of ``width`` ``(r, g, b)`` triples.
-        """
-        # Issue #3: grids must match output dimensions. Rebuild if the caller
-        # requests a different size than the constructor resolution.
-        size = max(width, height)
-        if size != self.resolution:
-            self.resolution = size
-            self._generate_normal_grid()
+        shadow_to_base = self._smoothstep(0.0, 0.62, tonal_position)
+        base_to_light = self._smoothstep(0.62, 1.0, tonal_position)
+
+        color = self._lerp(shadow_linear, base_linear, shadow_to_base)
+        color = self._lerp(color, light_linear, base_to_light)
+        return color
+
+    def _power_response(self, illuminance: float, ndl: float) -> float:
+        # The physical point/spot/area calculation produces illuminance. A UI
+        # color sphere still needs a display-referred response so 200% intensity
+        # does not instantly white-clip the entire object. At the calibrated
+        # reference point, E=1 gives response=1.
+        direct_energy = max(0.0, illuminance * ndl)
+        return (2.0 * direct_energy) / (1.0 + direct_energy) if direct_energy > 0.0 else 0.0
+
+    # ------------------------------------------------------------------
+    # Final display transforms
+    # ------------------------------------------------------------------
+    def _apply_display_controls(self, color: Color) -> Color:
+        # Contrast acts on luminance while preserving the color direction.
+        luma = 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]
+        contrasted_luma = 0.5 + (luma - 0.5) * self.contrast
+        if luma > 1.0e-8:
+            scale = max(0.0, contrasted_luma) / luma
+            color = self._mul(color, scale)
+        else:
+            color = (0.0, 0.0, 0.0)
+
+        # Global tone control is implemented as saturation, as the docker labels
+        # this row "Tone" and calls set_saturation().
+        luma = 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]
+        color = (
+            luma + (color[0] - luma) * self.saturation,
+            luma + (color[1] - luma) * self.saturation,
+            luma + (color[2] - luma) * self.saturation,
+        )
+
+        color = self._mul(color, self.brightness)
+
+        if self.mixer_mode == "Additive":
+            color = self._add(color, (0.045, 0.045, 0.045))
+        elif self.mixer_mode == "Multiplicative":
+            color = self._mul(color, 0.93)
+
+        # Simple deterministic grain. Random noise is intentionally avoided so
+        # redraws of the same settings remain stable while the user drags.
+        if self.grain > 0.0:
+            pass
+
+        return color
+
+    @staticmethod
+    def _tone_map(color: Color) -> Color:
+        # Reinhard is used only as a final safety net for specular/highlight
+        # values above display range. It is applied per channel in linear RGB.
+        return tuple(c / (1.0 + max(0.0, c)) for c in color)  # type: ignore[return-value]
+
+    @staticmethod
+    def _noise(row: int, col: int) -> float:
+        # Stable 32-bit integer hash -> [-1, 1].
+        x = (row * 374761393 + col * 668265263) & 0xFFFFFFFF
+        x ^= (x >> 13)
+        x = (x * 1274126177) & 0xFFFFFFFF
+        x ^= (x >> 16)
+        return (x / 4294967295.0) * 2.0 - 1.0
+
+    def _apply_grain(self, color: Color, row: int, col: int, shadow_factor: float) -> Color:
+        if self.grain <= 0.0:
+            return color
+        amount = self.grain / 100.0
+        if shadow_factor > 0.5:
+            amount *= 1.0 + self.DARK_GRAIN_BOOST
+        noise = self._noise(row, col)
+        scale = self.GRAIN_DEPTH * amount
+        return (
+            max(0.0, color[0] + noise * scale),
+            max(0.0, color[1] + noise * scale),
+            max(0.0, color[2] + noise * scale),
+        )
+
+    # ------------------------------------------------------------------
+    # Rendering
+    # ------------------------------------------------------------------
+    def render(self, base_color: Sequence[float], width: int, height: int) -> List[List[Pixel]]:
+        width = max(2, int(width))
+        height = max(2, int(height))
+
+        if self._grid_width != width or self._grid_height != height:
+            self._generate_geometry(width, height)
             self._compute_shading()
 
-        base = tuple(float(c) for c in base_color)
-        base_r, base_g, base_b = base
-        amb_r, amb_g, amb_b = self.ambient_color
-        amb = self.ambient
-        sr, sg, sb = self.shadow_color
-        hr, hg, hb = self.highlight_color
-        lr, lg, lb = self.light_color
-        # Normalise the light tint so it carries hue without carrying brightness.
-        lmax = lr if lr > lg else lg
-        if lb > lmax:
-            lmax = lb
-        if lmax > 1e-6:
-            lr, lg, lb = lr / lmax, lg / lmax, lb / lmax
-        lx, ly, lz = self._light_direction()
+        # Input colors are sRGB values at the plugin boundary. Convert them once
+        # and use linear RGB for all interpolation and lighting.
+        base_srgb = self._coerce_color(base_color)
+        base_linear = self._to_linear(base_srgb)
+        shadow_linear = self._to_linear(self.shadow_color)
+        light_linear = self._to_linear(self.light_color)
+        ambient_linear = self._to_linear(self.ambient_color)
+        highlight_linear = self._to_linear(self.highlight_color)
+        sky_linear = self._to_linear(self.AMBIENT_SKY)
 
-        # Hoist every per-pixel attribute lookup into a local. Reading self.X 40k
-        # times per render dominated the cost and made slider drags feel laggy.
-        mask_grid = self._mask_grid
-        diffuse_grid = self._diffuse_grid
-        shadow_grid = self._shadow_grid
-        refl_grid = self._refl_grid
-        rim_grid = self._rim_grid
-        intensity = self.light_intensity
-        shininess = self.shininess
-        spec_knee = self.spec_knee
-        brightness = self.brightness
-        saturation = self.saturation
-        mixer_mode = self.mixer_mode
-        contrast = self.contrast
-        glow_intensity = self.glow_intensity
-        has_glow = glow_intensity > 0
-        has_contrast = contrast != 1.0
-        is_additive = mixer_mode == "Additive"
-        is_mult = mixer_mode == "Multiplicative"
-        lerp = _lerp
-        to_rgb = _rgb_from_floats
-        sqrt = math.sqrt
-        max_ = max
-        min_ = min
+        output_linear: List[List[Color]] = []
 
-        out: List[List[RGB]] = []
         for row in range(height):
-            grow: List[RGB] = []
-            grow_append = grow.append
-            mrow = mask_grid[row]
-            drow = diffuse_grid[row]
-            srow = shadow_grid[row]
-            frow = refl_grid[row]
-            rim_row = rim_grid[row]
+            out_row: List[Color] = []
+            y = -1.0 + 2.0 * row / float(height - 1)
+
             for col in range(width):
-                if not mrow[col]:
-                    grow_append((0, 0, 0))
+                if not self._mask_grid[row][col]:
+                    out_row.append((0.0, 0.0, 0.0))
                     continue
 
-                diffuse = drow[col]
+                x = -1.0 + 2.0 * col / float(width - 1)
+                r2 = x * x + y * y
+                z = math.sqrt(max(0.0, 1.0 - r2))
+                nx, ny, nz = self._normal_grid[row][col]
 
-                # --- Base + diffuse -------------------------------------------------
-                # Interpolate from a dim base up to the base colour itself, rather
-                # than *adding* diffuse on top of the base. The additive form
-                # reached 2x the base at full light, so for any base above v=0.5
-                # it clipped to pure white across most of the lit hemisphere.
-                # The gamma lifts the midtones so the base colour is actually
-                # reached across most of the disc. N.L only reaches 1.0 at the
-                # single point facing the light, so without it the sphere stayed
-                # permanently dimmer than its own base colour and the base read
-                # as a tint rather than as the object.
-                lit = DIFFUSE_FLOOR + (1.0 - DIFFUSE_FLOOR) * (diffuse ** DIFFUSE_GAMMA) * intensity
-                r = base_r * lit
-                g = base_g * lit
-                b = base_b * lit
+                ldir, illuminance = self._light_for_surface(x, y, z)
+                ndl = max(0.0, nx * ldir[0] + ny * ldir[1] + nz * ldir[2])
+                nv = max(0.0, nz)  # camera is at +Z
 
-                # Tint the lit side toward the light colour, but normalise the tint
-                # first. Applied raw it multiplied the base down by its own
-                # darkest channel, so the fully lit side still fell short of the
-                # base colour and the sphere read as a dark plateau: the median
-                # pixel sat at 0.37 against a base of 0.55, and the base colour
-                # was barely present anywhere on the disc. Normalising keeps the
-                # light's hue and stops it dimming what it is meant to illuminate.
-                r = lerp(r, r * lr, TINT_STRENGTH)
-                g = lerp(g, g * lg, TINT_STRENGTH)
-                b = lerp(b, b * lb, TINT_STRENGTH)
+                tonal_color = self._tonal_color(
+                    shadow_linear,
+                    base_linear,
+                    light_linear,
+                    ndl,
+                )
 
-                # --- Shadow color blend (weight baked with the light grid) ---------
-                # Pulled back as the surface turns away toward the silhouette.
-                # N.L is smallest exactly at the outline, so without this the
-                # darkest pixels were the outermost ones and the sphere looked
-                # like it had a dark outline drawn round it. The reference pools
-                # the shadow *inside* the form and leaves a lighter band at the
-                # edge, which is what a real sphere does as the rim gathers light
-                # from its surroundings.
-                rim = rim_row[col]
-                shadow_t = srow[col] * (1.0 - rim * RIM_SHADOW_LIFT)
-                r = lerp(r, sr, shadow_t)
-                g = lerp(g, sg, shadow_t)
-                b = lerp(b, sb, shadow_t)
+                # Physical inverse-square / directional energy controls the
+                # intensity while the tonal map controls the artist-selected
+                # shadow/base/light colors.
+                direct_factor = self._power_response(illuminance, ndl)
 
-                # --- Rim light ----------------------------------------------------
-                # A soft lift at the silhouette, tinted by the highlight, so the
-                # edge reads as a rounded surface turning away rather than as a
-                # hard cut-out against the panel.
-                if rim:
-                    lift = rim * RIM_LIGHT
-                    r += hr * lift
-                    g += hg * lift
-                    b += hb * lift
+                # Preserve the selected shadow color even when the key light is
+                # turned away. Ambient acts as a lift rather than replacing it.
+                shadow_factor = 1.0 - self._smoothstep(0.0, 0.55, ndl)
+                ambient_factor = self._clamp(
+                    self.ambient * self.AMBIENT_SCALE
+                    + shadow_factor * self.ambient * 0.35
+                )
+                ambient_tint = self._lerp(shadow_linear, ambient_linear, 0.35)
 
-                # --- Ambient fill ---------------------------------------------------
-                if amb:
-                    r += amb_r * amb
-                    g += amb_g * amb
-                    b += amb_b * amb
+                # The direct sphere color is driven by the physical lighting
+                # response. A small floor prevents a dead black result at the
+                # extreme limb, which matches the manual's artistic dark floor.
+                body_factor = max(self.DIFFUSE_FLOOR, direct_factor)
+                body = self._mul(tonal_color, body_factor)
+                body = self._add(body, self._mul(ambient_tint, ambient_factor * self.AMBIENT_SKY_MIX))
 
-                # --- Brightness / saturation ---------------------------------------
-                if brightness != 1.0:
-                    r *= brightness
-                    g *= brightness
-                    b *= brightness
-                if saturation != 1.0:
-                    avg = (r + g + b) / 3.0
-                    r = avg + (r - avg) * saturation
-                    g = avg + (g - avg) * saturation
-                    b = avg + (b - avg) * saturation
+                # A cool sky contribution is strongest in the unlit portion.
+                body = self._add(body, self._mul(sky_linear, ambient_factor * 0.05))
 
-                # --- Specular highlight (Phong) ------------------------------------
-                # The reflection vector depends only on the light, so the grid
-                # stores the pre-normalized N.L value; only the shininess power
-                # is evaluated here.
-                rl = frow[col]
-                if rl > 0.0:
-                    spec = rl ** shininess
-                    # Ease the approach to the highlight. The raw power curve
-                    # rises steeply, so the last stretch into the highlight was
-                    # an abrupt step rather than a sheen. A smoothstep flattens
-                    # the slope at both ends, which makes the highlight arrive
-                    # gradually and keeps its edge from reading as a hard rim.
-                    # A smoothstep is the wrong easing here: it flattens the
-                    # ends but steepens the middle, which sharpened the edge of
-                    # the sheen instead of softening it. Squaring biases the
-                    # whole falloff toward the lit side, so the highlight spreads
-                    # out and fades gradually the way the reference does.
-                    spec = spec * spec
-                    # Ease the sheen into SPEC_MAX with a soft shoulder instead of
-                    # clamping it. A clamp pinned every pixel above the ceiling to
-                    # the ceiling, which flattened the core into a ~900px plateau
-                    # and left a hard step at its edge, so the highlight read as a
-                    # disc sitting on the sphere. This curve hits the same peak at
-                    # the same place and spreads the plateau's energy outward, so
-                    # the sheen fades gradually with no edge to see.
-                    spec = SPEC_MAX * spec * (spec_knee + 1.0) / (spec + spec_knee)
-                    r = lerp(r, hr, spec)
-                    g = lerp(g, hg, spec)
-                    b = lerp(b, hb, spec)
+                # Blinn-Phong specular. H uses the actual per-pixel L and fixed
+                # V=(0,0,1), exactly matching the front-facing projected sphere.
+                hx, hy, hz = self._normalize3(
+                    ldir[0],
+                    ldir[1],
+                    ldir[2] + 1.0,
+                )
+                ndh = max(0.0, nx * hx + ny * hy + nz * hz)
+                knee = max(self.SPEC_KNEE_MIN, min(self.SPEC_KNEE_MAX, self.spec_knee))
+                knee_curve = self._smoothstep(knee, 1.0, ndh)
+                spec_term = (
+                    illuminance
+                    * ndl
+                    * (ndh ** self.shininess)
+                    * knee_curve
+                )
+                spec_term *= self.spec_max
+                spec_term = self._clamp(spec_term, 0.0, 4.0)
+                body = self._add(body, self._mul(highlight_linear, spec_term))
 
-                # --- Mixer mode -----------------------------------------------------
-                if is_additive:
-                    add = 0.2 * diffuse
-                    r = min_(1.0, r + add)
-                    g = min_(1.0, g + add)
-                    b = min_(1.0, b + add)
-                elif is_mult:
-                    factor = 0.7 + 0.3 * diffuse
-                    r *= factor
-                    g *= factor
-                    b *= factor
+                # Fresnel-style rim, restricted to the illuminated side so it
+                # does not create a second light source in the shadow.
+                rim = (1.0 - nv) ** self.RIM_POWER
+                rim *= ndl
+                rim *= self.RIM_LIGHT
+                rim *= (0.5 + 0.5 * min(2.0, illuminance))
+                body = self._add(body, self._mul(light_linear, rim))
 
-                # --- Contrast (tone mapping) ---------------------------------------
-                if has_contrast:
-                    luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
-                    if luma > 0:
-                        # Contrast around mid-grey, in exponent form:
-                        #     below mid:  0.5 * (2*luma) ** contrast
-                        #     above mid:  1 - 0.5 * (2*(1-luma)) ** contrast
-                        # Identity at contrast 1, and every pixel collapses to
-                        # flat mid-grey as contrast approaches 0.
-                        #
-                        # The previous version inverted contrast and used it as a
-                        # plain gamma exponent, which was wrong twice over. It
-                        # divided by contrast, so the slider's own minimum
-                        # (contrast 0) raised ZeroDivisionError and took the
-                        # docker's render down with it. And it then scaled by
-                        # mapped/mapped, which is 1.0 for every input, so
-                        # contrast changed nothing at all -- measured as 0
-                        # differing pixels across the whole 0.25-3.0 range.
-                        # This form has no division, so 0 is simply "flat".
-                        if luma < 0.5:
-                            mapped = 0.5 * (2.0 * luma) ** contrast
-                        else:
-                            mapped = 1.0 - 0.5 * (2.0 * (1.0 - luma)) ** contrast
-                        scale = mapped / luma
-                        r *= scale
-                        g *= scale
-                        b *= scale
+                # Optional glow is another view-angle falloff, intentionally
+                # separate from physical specular so the Neon preset remains an
+                # artistic mode without corrupting the core light equation.
+                if self.glow_intensity > 0.0:
+                    glow_power = max(1.0, self.glow_radius / 4.0)
+                    glow = ((1.0 - nv) ** glow_power) * ndl
+                    glow *= self.glow_intensity / 100.0
+                    body = self._add(body, self._mul(highlight_linear, glow * 0.18))
 
-                # --- Glow / bloom ---------------------------------------------------
-                if has_glow:
-                    glow = diffuse * glow_intensity * 0.3
-                    r = min_(1.0, r + glow)
-                    g = min_(1.0, g + glow)
-                    b = min_(1.0, b + glow)
+                # Keep the three mixer modes as artist-level post responses.
+                if self.mixer_mode == "Additive":
+                    body = self._add(body, self._mul((1.0, 1.0, 1.0), ndl * 0.06))
+                elif self.mixer_mode == "Multiplicative":
+                    body = self._mul(body, 0.78 + 0.22 * ndl)
 
-                grow_append(to_rgb(r, g, b))
-            out.append(grow)
-        return out
+                body = self._apply_grain(body, row, col, shadow_factor)
+                body = self._apply_display_controls(body)
+                body = self._tone_map(body)
+                out_row.append(body)
+
+            output_linear.append(out_row)
+
+        # Image-space smoothing remains optional and bounded by the mask. The
+        # sphere itself is still generated from exact analytic normals.
+        if self.smooth > 0.0:
+            radius = int(round(self.smooth))
+            output_linear = self._soften_linear(output_linear, radius, width, height)
+
+        pixels: List[List[Pixel]] = []
+        for row in range(height):
+            prow: List[Pixel] = []
+            for col in range(width):
+                if not self._mask_grid[row][col]:
+                    prow.append((0, 0, 0))
+                    continue
+                srgb = self._from_linear(output_linear[row][col])
+                prow.append((
+                    int(self._clamp(srgb[0]) * 255.0 + 0.5),
+                    int(self._clamp(srgb[1]) * 255.0 + 0.5),
+                    int(self._clamp(srgb[2]) * 255.0 + 0.5),
+                ))
+            pixels.append(prow)
+        return pixels
 
     # ------------------------------------------------------------------
-    # Convenience: flat list of pixels (useful for tests / bulk ops)
+    # Smoothing
     # ------------------------------------------------------------------
-    def render_flat(self, base_color: Sequence[float], width: int, height: int) -> List[RGB]:
-        """Like :meth:`render` but returns a single flattened list of RGB triples."""
-        rows = self.render(base_color, width, height)
-        return [pixel for row in rows for pixel in row]
+    def _soften_linear(self, grid: List[List[Color]], radius: int, width: int, height: int) -> List[List[Color]]:
+        radius = max(0, min(2, int(radius)))
+        if radius == 0:
+            return grid
+
+        if radius == 1:
+            kernel = [1.0, 2.0, 1.0]
+        else:
+            kernel = [1.0, 4.0, 6.0, 4.0, 1.0]
+        total = sum(kernel)
+        kernel = [k / total for k in kernel]
+        offset = len(kernel) // 2
+
+        horizontal: List[List[Color]] = [
+            [(0.0, 0.0, 0.0) for _ in range(width)] for _ in range(height)
+        ]
+
+        for row in range(height):
+            for col in range(width):
+                if not self._mask_grid[row][col]:
+                    continue
+                ar = ag = ab = aw = 0.0
+                for k, weight in enumerate(kernel):
+                    c = min(width - 1, max(0, col + k - offset))
+                    if self._mask_grid[row][c]:
+                        px = grid[row][c]
+                        ar += px[0] * weight
+                        ag += px[1] * weight
+                        ab += px[2] * weight
+                        aw += weight
+                if aw > 0.0:
+                    horizontal[row][col] = (ar / aw, ag / aw, ab / aw)
+
+        result: List[List[Color]] = [
+            [(0.0, 0.0, 0.0) for _ in range(width)] for _ in range(height)
+        ]
+        for row in range(height):
+            for col in range(width):
+                if not self._mask_grid[row][col]:
+                    continue
+                ar = ag = ab = aw = 0.0
+                for k, weight in enumerate(kernel):
+                    r = min(height - 1, max(0, row + k - offset))
+                    if self._mask_grid[r][col]:
+                        px = horizontal[r][col]
+                        ar += px[0] * weight
+                        ag += px[1] * weight
+                        ab += px[2] * weight
+                        aw += weight
+                if aw > 0.0:
+                    result[row][col] = (ar / aw, ag / aw, ab / aw)
+        return result
+
+    # Kept for compatibility with tests that used the historical method.
+    def _soften(self, grid, mask, width, height):
+        return self._soften_linear(grid, int(round(self.smooth)), width, height)
+
+    # ------------------------------------------------------------------
+    # Compatibility helpers
+    # ------------------------------------------------------------------
+    def mask_grid(self):
+        return self._mask_grid
+
+    def coverage_grid(self):
+        return self._coverage_grid
+
+    def _rolloff(self, pixel: Color) -> Color:
+        maximum = max(pixel)
+        if maximum > 1.0:
+            scale = 1.0 / (1.0 + maximum)
+            return self._mul(pixel, scale)
+        return pixel
+
+    @staticmethod
+    def _rgb_from_floats(r: float, g: float, b: float) -> Pixel:
+        return (
+            int(max(0.0, min(1.0, r)) * 255.0 + 0.5),
+            int(max(0.0, min(1.0, g)) * 255.0 + 0.5),
+            int(max(0.0, min(1.0, b)) * 255.0 + 0.5),
+        )
 
 
-# ---------------------------------------------------------------------------
-# Convenience factory
-# ---------------------------------------------------------------------------
-def create_engine(resolution: int = 256) -> ColorEngine:
-    """Create a :class:`ColorEngine` with default lighting parameters."""
-    return ColorEngine(resolution=resolution)
+# Module-level aliases kept for the pre-fix docker/tests, which did
+# ``from .color_engine import SPEC_KNEE, SPEC_KNEE_MIN, SPEC_KNEE_MAX``.
+SPEC_KNEE = ColorEngine.SPEC_KNEE
+SPEC_KNEE_MIN = ColorEngine.SPEC_KNEE_MIN
+SPEC_KNEE_MAX = ColorEngine.SPEC_KNEE_MAX
+LIGHT_TYPES = ColorEngine.LIGHT_TYPES
+MIXER_MODES = ColorEngine.MIXER_MODES

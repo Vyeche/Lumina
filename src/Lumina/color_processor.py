@@ -1,103 +1,104 @@
-"""color_processor.py — Krita-facing shading bridge over the pure engine.
+"""Krita-facing shading bridge for the Lumina sphere renderer.
 
-``color_engine.py`` is framework-agnostic (pure tuples, no Qt). This module is
-the *adapter* that lets the rest of the Krita plugin talk to it using the
-historical ``QColor`` / ``QImage`` API:
-
-    * Accepts ``QColor`` values from Krita.
-    * Exposes the same ``set_*`` methods as the old engine.
-    * Returns a ``QImage`` (inside Krita) with an identical shading result.
-
-Why the split?  ``color_engine.py`` can be unit-tested on any machine, while
-this adapter only needs to run inside Krita (where PyQt5 exists).  The two are
-kept in sync by construction: every color is converted to normalized floats and
-fed straight into :class:`ColorEngine`.
-
-This module is import-safe both inside Krita AND standalone (it guards the
-``QColor`` import so the shading math can still be exercised on the host via
-``color_engine.py``).
+This module keeps Qt and Krita details outside the pure-Python lighting engine.
+The engine works in normalized color values and performs the actual sphere
+geometry, light transport, artist-controlled tonal mapping, and final color
+conversion. This adapter accepts QColor values and returns a QImage when Qt is
+available.
 """
 
-import math
-from typing import Optional, Sequence
+from typing import Sequence
 
-# Only import Qt if it is actually available.  Inside the Krita flatpak PyQt5
-# is installed; on the host (and in CI) it is not — and we must not crash here.
-try:  # pragma: no cover - depends on environment
+try:
     from PyQt5.QtGui import QColor, QImage
-
     _HAS_QT = True
-except Exception:  # noqa: BLE001 - intentionally catch all import failures
+except Exception:
     _HAS_QT = False
 
-# ``color_engine`` is a pure-Python submodule. Inside the Krita package it is a
-# relative import (``color_processor`` lives in the ``LuminaPlugin`` package);
-# on the host (tests) it is a top-level module in the working directory. The
-# absolute-import fallback keeps the standalone test runnable from the package
-# directory; the relative import is what works inside Krita (avoids
-# ``ModuleNotFoundError: No module named 'color_engine'``).
-try:  # pragma: no cover - depends on packaging
+try:
     from .color_engine import ColorEngine
-except ImportError:  # noqa: BLE001
-    from color_engine import ColorEngine
+except ImportError:
+    try:
+        from color_engine import ColorEngine
+    except ImportError:
+        import importlib.util as _ilu
+        import os as _os
+        _ce_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "color_engine.py")
+        _spec = _ilu.spec_from_file_location("color_engine", _ce_path)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        ColorEngine = _mod.ColorEngine
 
 
-# ---------------------------------------------------------------------------
-# Color conversion helpers (QColor <-> normalized floats)
-# ---------------------------------------------------------------------------
 def _qcolor_to_floats(qcolor) -> Sequence[float]:
-    """Convert a ``QColor`` to a normalized ``(r, g, b)`` tuple in 0..1."""
+    """Convert a QColor to normalized red, green, blue values in the range 0..1."""
     return (qcolor.redF(), qcolor.greenF(), qcolor.blueF())
 
 
-def _floats_to_qcolor(r: float, g: float, b: float) -> "QColor":
-    """Convert normalized floats to a ``QColor`` (Krita context)."""
-    return QColor.fromRgbF(max(0.0, min(1.0, r)), max(0.0, min(1.0, g)), max(0.0, min(1.0, b)))
+def _floats_to_qcolor(r: float, g: float, b: float):
+    """Convert normalized red, green, blue values in the range 0..1 to QColor."""
+    if not _HAS_QT:
+        raise RuntimeError("PyQt5 is required to create QColor values")
+    return QColor.fromRgbF(
+        max(0.0, min(1.0, float(r))),
+        max(0.0, min(1.0, float(g))),
+        max(0.0, min(1.0, float(b))),
+    )
 
 
-# ---------------------------------------------------------------------------
-# SphereColorProcessor — Krita-facing shading facade
-# ---------------------------------------------------------------------------
 class SphereColorProcessor:
-    """Krita-facing shading facade over :class:`ColorEngine`.
+    """Krita-facing facade over ColorEngine.
 
-    All color parameters are stored internally as normalized ``(r, g, b)``
-    tuples (matching :class:`ColorEngine`), and converted to/from ``QColor``
-    only at the boundary with Krita code.  The public ``set_*`` methods mirror
-    the historical plugin API so existing widget handlers work unchanged.
+    The public color attributes are kept synchronized with the underlying
+    engine so callers that inspect processor state do not see stale values.
     """
 
     def __init__(self, resolution: int = 256):
-        self.resolution = max(8, min(resolution, 512))
-        # Public (normalized) color state, mirrored by ColorEngine.
-        self.ambient_color: Sequence[float] = (0.8627, 0.8627, 0.9412)
-        self.shadow_color: Sequence[float] = (0.1569, 0.1569, 0.2353)
-        self.highlight_color: Sequence[float] = (1.0, 1.0, 1.0)
+        self.resolution = max(8, min(int(resolution), 512))
 
-        # Delegate all geometry + shading to the pure engine.
+        self.ambient_color = (0.88, 0.88, 0.88)
+        self.shadow_color = (0.1569, 0.1569, 0.2353)
+        self.highlight_color = (1.0, 1.0, 1.0)
+        self.light_color = (1.0, 1.0, 1.0)
+
         self.engine = ColorEngine(resolution=self.resolution)
 
+        self.ambient_color = tuple(self.engine.ambient_color)
+        self.shadow_color = tuple(self.engine.shadow_color)
+        self.highlight_color = tuple(self.engine.highlight_color)
+        self.light_color = tuple(self.engine.light_color)
+
     # ------------------------------------------------------------------
-    # Setters — accept QColor (Krita) or normalized floats (tests)
+    # Color setters
     # ------------------------------------------------------------------
     def set_ambient_color(self, color) -> None:
-        """Set ambient color. Accepts a ``QColor`` or an ``(r,g,b)`` sequence."""
-        self.engine.set_ambient_color(self._coerce_color(color))
+        value = self._coerce_color(color)
+        self.ambient_color = value
+        self.engine.set_ambient_color(value)
 
     def set_shadow_color(self, color) -> None:
-        self.engine.set_shadow_color(self._coerce_color(color))
+        value = self._coerce_color(color)
+        self.shadow_color = value
+        self.engine.set_shadow_color(value)
 
     def set_highlight_color(self, color) -> None:
-        self.engine.set_highlight_color(self._coerce_color(color))
+        value = self._coerce_color(color)
+        self.highlight_color = value
+        self.engine.set_highlight_color(value)
 
     def set_light_color(self, color) -> None:
-        """Tint for the lit side. Accepts a ``QColor`` or an ``(r,g,b)`` sequence."""
-        self.engine.set_light_color(self._coerce_color(color))
+        value = self._coerce_color(color)
+        self.light_color = value
+        self.engine.set_light_color(value)
 
-
-    # --- Lighting / intensity (unchanged signatures) ---
+    # ------------------------------------------------------------------
+    # Lighting and display setters
+    # ------------------------------------------------------------------
     def set_light_angle(self, azimuth, elevation=None) -> None:
         self.engine.set_light_angle(azimuth, elevation)
+
+    def set_light_elevation(self, elevation) -> None:
+        self.engine.set_light_elevation(elevation)
 
     def set_ambient(self, value) -> None:
         self.engine.set_ambient(value)
@@ -111,17 +112,20 @@ class SphereColorProcessor:
     def set_spec_knee(self, value) -> None:
         self.engine.set_spec_knee(value)
 
+    def set_spec_max(self, value) -> None:
+        self.engine.set_spec_max(value)
+
     def set_contrast(self, value) -> None:
         self.engine.set_contrast(value)
-
-    def set_light_elevation(self, elevation) -> None:
-        self.engine.set_light_elevation(elevation)
 
     def set_brightness(self, value) -> None:
         self.engine.set_brightness(value)
 
     def set_saturation(self, value) -> None:
         self.engine.set_saturation(value)
+
+    def set_light_type(self, value) -> None:
+        self.engine.set_light_type(value)
 
     def set_mixer_mode(self, mode) -> None:
         self.engine.set_mixer_mode(mode)
@@ -132,99 +136,115 @@ class SphereColorProcessor:
     def set_glow_radius(self, value) -> None:
         self.engine.set_glow_radius(value)
 
+    def set_grain(self, value) -> None:
+        self.engine.set_grain(value)
+
+    def set_smooth(self, value) -> None:
+        self.engine.set_smooth(value)
+
     # ------------------------------------------------------------------
     # Rendering
     # ------------------------------------------------------------------
     def render(self, base_color, width, height):
-        """Render the sphere to a list of ``(r, g, b)`` triples (0..255)."""
-        return self.engine.render(base_color, width, height)
+        """Render the sphere as a list of red, green, blue integer triples."""
+        return self.engine.render(self._coerce_color(base_color), width, height)
 
     def render_image(self, base_color, width=None, height=None):
-        """Render the sphere and return a ``QImage`` (Krita context only).
+        """Render the sphere and return a QImage, or raw BGRA bytes without Qt."""
+        w = self.resolution if width is None else max(2, int(width))
+        h = self.resolution if height is None else max(2, int(height))
 
-        Pixels outside the sphere silhouette are fully transparent (alpha 0),
-        and the one-pixel band straddling the rim carries fractional alpha so
-        the edge is antialiased rather than a hard staircase.
-        Falls back to a plain ``bytes`` buffer of packed ARGB pixels when Qt is
-        unavailable, so callers can still inspect raw pixel data in tests.
-        """
-        w = width or self.resolution
-        h = height or self.resolution
         pixels = self.engine.render(self._coerce_color(base_color), w, h)
         raw = self._build_buffer(pixels, w, h)
+
         if _HAS_QT:
-            return QImage(bytes(raw), w, h, w * 4, QImage.Format_ARGB32).copy()
+            return QImage(
+                bytes(raw),
+                w,
+                h,
+                w * 4,
+                QImage.Format_ARGB32,
+            ).copy()
+
         return raw
 
     def _build_buffer(self, pixels, w, h):
-        """Pack the render into a BGRA byte buffer with antialiased edges.
-
-        Built once and shared by the QImage and raw-bytes paths, which were
-        previously identical copies of the same loop.
-
-        Two things produce the soft rim:
-
-        * **Fractional alpha** from the engine's coverage grid. The binary mask
-          is still used to decide *what is coloured*, but the alpha follows how
-          much of each pixel the circle actually covers.
-        * **Edge colour borrowing.** A pixel just outside the circle is still
-          partly visible, and the engine returns black there. Compositing
-          partially-transparent black over the panel would leave a dark
-          one-pixel halo, so the outside band copies the colour of its nearest
-          shaded neighbour instead. Without this the antialiasing trades jaggies
-          for a dark fringe.
-        """
+        """Pack RGB pixels into BGRA with the engine's analytic circle coverage."""
         mask = self.engine.mask_grid()
-        cov = self.engine.coverage_grid()
+        coverage = self.engine.coverage_grid()
         raw = bytearray(w * h * 4)
-        i = 0
+        index = 0
+
         for row in range(h):
-            prow = pixels[row]
-            mrow = mask[row]
-            crow = cov[row]
+            pixel_row = pixels[row]
+            mask_row = mask[row]
+            coverage_row = coverage[row]
+
             for col in range(w):
-                c = crow[col]
-                if mrow[col]:
-                    r, g, b = prow[col]
-                    a = c
-                elif c > 0.0:
-                    # Outside the mask but still partly covered: borrow the
-                    # nearest shaded neighbour so the edge does not darken.
-                    src = self._nearest_shade(pixels, mask, row, col, w, h)
-                    r, g, b = src
-                    a = c
+                alpha = coverage_row[col]
+
+                if mask_row[col]:
+                    red, green, blue = pixel_row[col]
+
+                elif alpha > 0.0:
+                    red, green, blue = self._nearest_shade(
+                        pixels,
+                        mask,
+                        row,
+                        col,
+                        w,
+                        h,
+                    )
+
                 else:
-                    r = g = b = 0
-                    a = 0.0
-                raw[i] = b
-                raw[i + 1] = g
-                raw[i + 2] = r
-                raw[i + 3] = int(a * 255.0 + 0.5) if a > 0.0 else 0
-                i += 4
+                    red = green = blue = 0
+                    alpha = 0.0
+
+                raw[index] = int(max(0.0, min(255.0, blue)))
+                raw[index + 1] = int(max(0.0, min(255.0, green)))
+                raw[index + 2] = int(max(0.0, min(255.0, red)))
+                raw[index + 3] = int(max(0.0, min(1.0, alpha)) * 255.0 + 0.5)
+                index += 4
+
         return raw
 
     @staticmethod
-    def _nearest_shade(pixels, mask, row, col, w, h):
-        """Colour of the closest masked-in pixel, searched 4-way then outward.
+    def _nearest_shade(pixels, mask, row, col, width, height):
+        """Find the nearest rendered interior pixel for an antialiased edge pixel."""
+        max_radius = max(width, height)
 
-        The outside band is one pixel wide, so the first ring almost always
-        answers immediately; the wider sweep is only a fallback for the grid
-        corners, which no inward direction can reach.
-        """
-        for radius in range(1, max(w, h)):
-            for dr in range(-radius, radius + 1):
-                for dc in (-radius, radius) if abs(dr) != radius else range(-radius, radius + 1):
-                    r2, c2 = row + dr, col + dc
-                    if 0 <= r2 < h and 0 <= c2 < w and mask[r2][c2]:
-                        return pixels[r2][c2]
+        for radius in range(1, max_radius):
+            for delta_row in range(-radius, radius + 1):
+                if abs(delta_row) == radius:
+                    delta_columns = range(-radius, radius + 1)
+                else:
+                    delta_columns = (-radius, radius)
+
+                for delta_col in delta_columns:
+                    candidate_row = row + delta_row
+                    candidate_col = col + delta_col
+
+                    if not (0 <= candidate_row < height and 0 <= candidate_col < width):
+                        continue
+
+                    if mask[candidate_row][candidate_col]:
+                        return pixels[candidate_row][candidate_col]
+
         return (0, 0, 0)
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Input color normalization
     # ------------------------------------------------------------------
     def _coerce_color(self, color):
-        """Normalize a QColor / sequence into an ``(r, g, b)`` float tuple."""
+        """Normalize QColor or RGB sequence to a clamped normalized RGB tuple."""
         if _HAS_QT and isinstance(color, QColor):
-            return (color.redF(), color.greenF(), color.blueF())
-        # Assume a sequence of ints 0..255 (or normalized floats).
-        return tuple(float(c) for c in color)
+            return _qcolor_to_floats(color)
+
+        values = tuple(float(component) for component in color)
+        if len(values) != 3:
+            raise ValueError("Color must contain exactly three channels")
+
+        if any(abs(component) > 1.0 for component in values):
+            values = tuple(component / 255.0 for component in values)
+
+        return tuple(max(0.0, min(1.0, value)) for value in values)

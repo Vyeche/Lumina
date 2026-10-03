@@ -176,15 +176,9 @@ class SphereWidget(QWidget):
             # hard right edge when the widget was smaller than the image).
             painter.drawImage(QRectF(off_x, off_y, dia, dia), self._image)
 
-            # Faint rim stroke to define the silhouette against dark UIs.
-            painter.setPen(QPen(QColor(255, 255, 255, 46), 1.5))
-            painter.setBrush(Qt.NoBrush)
-            # QRectF, not the four-argument overload: _orb_geometry() returns
-            # floats so the orb can be centred on a fractional pixel under HiDPI,
-            # and the (x, y, w, h) form of drawEllipse only accepts ints. Passing
-            # floats there raised TypeError on every repaint, which aborted the
-            # rest of paintEvent -- so the picker pointer never drew either.
-            painter.drawEllipse(QRectF(off_x + 1, off_y + 1, dia - 3, dia - 3))
+            # No rim stroke: the coverage-grid alpha already antialiases the
+            # silhouette, and a painted ring read as a light outline drawn
+            # round dark spheres.
 
             # Picker pointer: a small ring marking the last sampled/picked point
             # on the orb surface (the reference shows this draggable marker).
@@ -291,14 +285,17 @@ class SphereWidget(QWidget):
             return
         self._hover_color = pixel
         # Remember where the pointer is, in widget coordinates.
-        side = min(self.width(), self.height())
-        off_x = (self.width() - side) / 2.0
-        off_y = (self.height() - side) / 2.0
-        res = self._image.width() or self._image.height()
-        self._pointer = QPointF(
-            off_x + (sx + 0.5) * side / res,
-            off_y + (sy + 0.5) * side / res,
-        )
+        # Use the same inset orb rectangle as paintEvent, not the full widget
+        # side: the image is drawn inside side - 2*ORB_MARGIN.
+        off_x, off_y, dia = self._orb_geometry()
+        res = ((self._image.width() or self._image.height())
+               if self._image is not None else 0)
+        if res > 0:
+            pointer = QPointF(
+                off_x + (sx + 0.5) * dia / float(res),
+                off_y + (sy + 0.5) * dia / float(res),
+            )
+            self._pointer = pointer
         self._reposition_preview()
         if self._hover_cb is not None:
             try:
@@ -367,8 +364,8 @@ class SphereWidget(QWidget):
             v *= k
         # Derived from the (possibly projected) u/v rather than the raw point,
         # so the projected case samples the rim instead of a masked-out pixel.
-        sx = int((u + 1.0) * 0.5 * res)
-        sy = int((v + 1.0) * 0.5 * res)
+        sx = max(0, min(res - 1, int(round((u + 1.0) * 0.5 * (res - 1)))))
+        sy = max(0, min(res - 1, int(round((v + 1.0) * 0.5 * (res - 1)))))
         return max(0, min(res - 1, sx)), max(0, min(res - 1, sy))
 
     def resizeEvent(self, event):

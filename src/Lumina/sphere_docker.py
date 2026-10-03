@@ -50,6 +50,8 @@ from .color_engine import SPEC_KNEE, SPEC_KNEE_MIN, SPEC_KNEE_MAX
 from .sphere_widget import SphereWidget
 from .color_controls import (Accent, ColorSampler, ColorSlider,
                              CollapsibleSection, SettingsPanel)
+from .tooltip import set_tooltip as _set_tooltip
+from .tooltip import TOOLTIP_BG, TOOLTIP_FG, TOOLTIP_BORDER
 
 # ---------------------------------------------------------------------------
 # Logging — write the full log to a file in the plugin directory so crashes are
@@ -75,6 +77,11 @@ except Exception as exc:  # pragma: no cover - logging must never break the plug
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+# Highlight-size endpoints for the gear popup, in engine shininess. The
+# reference's satin sheen is SHININESS_REF; above SHININESS_MAX the lobe is a
+# hard dot rather than a highlight.
+SHININESS_REF = 8.0
+SHININESS_MAX = 64.0
 ORB_SIZE = 200          # diameter of the circular orb
 ORB_RENDER = 200        # engine render resolution (square)
 # Ceiling on the render resolution while a slider is held down. The shading loop
@@ -83,6 +90,11 @@ ORB_RENDER = 200        # engine render resolution (square)
 # handle visibly lags the cursor. 128px costs ~15.6 ms (~64 Hz), which tracks the
 # pointer smoothly, and the full-resolution orb is drawn again on release.
 DRAG_RENDER = 128
+# Settings schema version. v1 stored Tone as brightness (bug); v2 stores Tone
+# as saturation. v3 persists spec_max. v4 migrates Diffuse/highlight-size
+# slider levels to the perceptual curves (old linear positions reinterpreted
+# as old physical values, then mapped to equivalent new positions).
+SETTINGS_VERSION = 4
 # --- Persisted settings -----------------------------------------------------
 # Stored via QSettings so they land somewhere the user can find and back up. The
 # Inifile format is deliberate: it is a plain text file inside the flatpak's
@@ -143,45 +155,49 @@ def _migrate_legacy_settings() -> bool:
 # user's to keep -- a preset that silently rotated the light or overwrote the
 # colours they are painting from would be actively hostile.
 #
+# Preset calibration references (shadow/base/light relationships) are tuning
+# references only, NOT target overrides: presets may change shininess, spec_max,
+# ambient, glow, mixer, light type/intensity, but never shadow/base/light targets.
+#
 # Values are the ones the corresponding slider rows display, so applying a
 # preset can move the rows and stay in sync with the engine.
 _PRESETS = (
     {"key": "artistic", "label": "Artistic", "glyph": "sparkle",
      "accent": Accent.AMBER,
      "tip": "Artistic: bright white highlights, high contrast",
-     "values": {"highlight": (1.0, 1.0, 1.0), "ambient": 10, "intensity": 100,
-                "contrast": 120, "specular": 2, "diffuse": 72, "glow": 0,
-                "tone": 100, "mixer": "Blended"}},
+     "values": {"highlight": (1.0, 0.86, 0.72), "ambient": 12, "intensity": 100,
+                "contrast": 120, "specular": 8, "diffuse": 72, "glow": 0,
+                "tone": 100, "mixer": "Blended", "spec_max": 24}},
     {"key": "real", "label": "Real", "glyph": "layers",
      "accent": Accent.PURPLE,
      "tip": "Real-world: warm highlights, soft natural contrast",
-     "values": {"highlight": (0.98, 0.94, 0.86), "ambient": 10, "intensity": 100,
-                "contrast": 90, "specular": 2, "diffuse": 72, "glow": 0,
-                "tone": 100, "mixer": "Blended"}},
+     "values": {"highlight": (1.0, 1.0, 1.0), "ambient": 10, "intensity": 100,
+                "contrast": 90, "specular": 12, "diffuse": 72, "glow": 0,
+                "tone": 100, "mixer": "Blended", "spec_max": 20}},
     {"key": "nocturne", "label": "Nocturne", "glyph": "moon",
      "accent": Accent.BLUE,
      "tip": "Nocturne: low key, cool moonlight, deep shadow",
-     "values": {"highlight": (0.82, 0.88, 1.0), "ambient": 4, "intensity": 92,
-                "contrast": 135, "specular": 3, "diffuse": 45, "glow": 0,
-                "tone": 88, "mixer": "Blended"}},
-    {"key": "gloss", "label": "Gloss", "glyph": "sun",
+     "values": {"highlight": (0.65, 0.75, 1.0), "ambient": 4, "intensity": 92,
+                "contrast": 135, "specular": 8, "diffuse": 45, "glow": 0,
+                "tone": 88, "mixer": "Blended", "spec_max": 18}},
+    {"key": "gloss", "label": "Gloss", "glyph": "gloss",
      "accent": Accent.CYAN,
      "tip": "Gloss: tight bright highlight, slick and punchy",
-     "values": {"highlight": (1.0, 0.98, 0.94), "ambient": 8, "intensity": 100,
-                "contrast": 118, "specular": 8, "diffuse": 30, "glow": 12,
-                "tone": 105, "mixer": "Blended"}},
+     "values": {"highlight": (1.0, 1.0, 1.0), "ambient": 8, "intensity": 100,
+                "contrast": 118, "specular": 28, "diffuse": 30, "glow": 12,
+                "tone": 105, "mixer": "Blended", "spec_max": 24}},
     {"key": "matte", "label": "Matte", "glyph": "disc",
      "accent": Accent.NEUTRAL,
      "tip": "Matte: even clay-like falloff, no specular hotspot",
-     "values": {"highlight": (1.0, 1.0, 1.0), "ambient": 28, "intensity": 100,
-                "contrast": 82, "specular": 1, "diffuse": 100, "glow": 0,
-                "tone": 96, "mixer": "Blended"}},
+     "values": {"highlight": (0.94, 0.94, 0.92), "ambient": 12, "intensity": 100,
+                "contrast": 82, "specular": 5, "diffuse": 100, "glow": 0,
+                "tone": 96, "mixer": "Blended", "spec_max": 10}},
     {"key": "neon", "label": "Neon", "glyph": "bolt",
      "accent": Accent.GREEN,
      "tip": "Neon: saturated and blooming, coloured light",
-     "values": {"highlight": (0.72, 0.95, 1.0), "ambient": 12, "intensity": 100,
-                "contrast": 125, "specular": 4, "diffuse": 55, "glow": 45,
-                "tone": 118, "mixer": "Additive"}},
+     "values": {"highlight": (0.80, 1.0, 1.0), "ambient": 3, "intensity": 100,
+                "contrast": 125, "specular": 12, "diffuse": 55, "glow": 35,
+                "tone": 118, "mixer": "Additive", "spec_max": 28}},
 )
 
 HEADER_BTN = 38         # gear / eyedropper size in the header row
@@ -249,12 +265,12 @@ TEXT_BRIGHT = QColor(225, 232, 245)
 # made these hard to read in the first place.
 TOOLTIP_STYLE = """
 QToolTip {{
-    background-color: #000000;
-    color: #ffffff;
+    background-color: {bg};
+    color: {fg};
     border: 1px solid {border};
-    padding: 4px 6px;
+    padding: 0px;
 }}
-""".format(border=PANEL_BORDER.name())
+""".format(bg=TOOLTIP_BG, fg=TOOLTIP_FG, border=TOOLTIP_BORDER)
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +334,7 @@ class LabeledSliderRow(QWidget):
         metrics = QFontMetricsF(self._label.font())
         elided = metrics.elidedText(text, Qt.ElideRight, self.LABEL_WIDTH)
         self._label.setText(elided)
-        self._label.setToolTip(text)
+        _set_tooltip(self._label, text)
         self._label.setMinimumWidth(self.LABEL_WIDTH)
 
     #: Caption column width. The rows are dot(5) + label + slider(120 min) +
@@ -340,7 +356,8 @@ class ToolButton(QPushButton):
     icon tab bar.
     """
 
-    GLYPHS = ("gear", "eyedropper", "sparkle", "layers", "grid", "target")
+    GLYPHS = ("gear", "eyedropper", "sparkle", "layers", "grid", "target",
+              "point", "sun", "spot", "area", "gloss")
 
     def __init__(self, accent: Accent = Accent.NEUTRAL, checked: bool = False,
                  glyph: str = "target", size: int = 30, checkable: bool = True,
@@ -419,7 +436,10 @@ class ToolButton(QPushButton):
         pen = QPen(col, 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
         p.setPen(pen)
         p.setBrush(Qt.NoBrush)
-        R, d, off = 5.4, 2.8, 1.3
+        # Shifted right so the crescent's painted mass sits on center: the
+        # visible shape spans ox-R..ox+d/2, i.e. its middle is ~2px left of
+        # the outer circle, so the outer circle is pushed right to compensate.
+        R, d, off = 5.4, 2.8, -2.0
         ox, ix = cx - off, cx - off + d
         h = math.sqrt(R * R - (d / 2.0) ** 2)
         a = math.degrees(math.atan2(h, d / 2.0))
@@ -466,6 +486,44 @@ class ToolButton(QPushButton):
             QPointF(cx + 3.0, cy - 0.6), QPointF(cx - 0.1, cy - 0.6),
         ]))
 
+    def _draw_point(self, p, cx, cy, col):
+        """Nearby omni lamp: filled bulb with a soft halo."""
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        p.drawEllipse(QPointF(cx, cy), 2.2, 2.2)
+        p.setPen(QPen(col, 1.3))
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(QPointF(cx, cy), 5.4, 5.4)
+
+    def _draw_spot(self, p, cx, cy, col):
+        """Cone beam: apex dot widening into a soft-edged cone."""
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        p.drawEllipse(QPointF(cx, cy - 5.2), 1.6, 1.6)
+        pen = QPen(col, 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawPolyline(QPointF(cx, cy - 3.4), QPointF(cx - 4.6, cy + 5.4),
+                       QPointF(cx + 4.6, cy + 5.4), QPointF(cx, cy - 3.4))
+
+    def _draw_area(self, p, cx, cy, col):
+        """Flat emitting panel with parallel rays below it."""
+        pen = QPen(col, 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawRect(QRectF(cx - 5.5, cy - 5.5, 11.0, 4.2))
+        for dx in (-3.6, 0.0, 3.6):
+            p.drawLine(QPointF(cx + dx, cy + 0.6), QPointF(cx + dx, cy + 5.4))
+
+    def _draw_gloss(self, p, cx, cy, col):
+        """Specular streak: diagonal slash with a hotspot dot, for Gloss."""
+        p.setPen(QPen(col, 2.6, Qt.SolidLine, Qt.RoundCap))
+        p.setBrush(Qt.NoBrush)
+        p.drawLine(QPointF(cx - 4.5, cy + 4.5), QPointF(cx + 2.5, cy - 2.5))
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        p.drawEllipse(QPointF(cx + 4.2, cy - 4.2), 1.8, 1.8)
+
     def paintEvent(self, event):
         try:
             p = QPainter(self)
@@ -494,6 +552,10 @@ class ToolButton(QPushButton):
                 "sun": self._draw_sun,
                 "disc": self._draw_disc,
                 "bolt": self._draw_bolt,
+                "point": self._draw_point,
+                "spot": self._draw_spot,
+                "area": self._draw_area,
+                "gloss": self._draw_gloss,
             }.get(self.glyph, self._draw_target)
             fn(p, cx, cy, col)
             p.end()
@@ -595,6 +657,12 @@ class MixerRow(QWidget):
     """
 
     MODES = ("Blended", "Additive", "Multiplicative")
+    CAPTION = "Mixer"
+    TIPS = {
+        "Blended": "Natural balance of shadow, base and light",
+        "Additive": "Brighter: adds light energy, lifts the shadows",
+        "Multiplicative": "Deeper: multiplies light energy, richer darks",
+    }
 
     def __init__(self, current: str = "Blended", parent=None):
         super().__init__(parent)
@@ -609,7 +677,7 @@ class MixerRow(QWidget):
                           % Accent.NEUTRAL.name())
         row.addWidget(dot)
 
-        cap = QLabel("Mixer")
+        cap = QLabel(self.CAPTION)
         cap.setFixedWidth(52)
         cap.setStyleSheet("QLabel { color: %s; font-size: 10px; }" % TEXT_DIM.name())
         row.addWidget(cap)
@@ -621,6 +689,7 @@ class MixerRow(QWidget):
             btn.setCursor(Qt.PointingHandCursor)
             btn.setFocusPolicy(Qt.StrongFocus)
             btn.setStyleSheet(self._style(mode == current))
+            _set_tooltip(btn, self.TIPS.get(mode, mode))
             btn.clicked.connect(lambda _c, m=mode: self._on_click(m))
             self._buttons[mode] = btn
             row.addWidget(btn, 1)
@@ -644,6 +713,67 @@ class MixerRow(QWidget):
         for m, btn in self._buttons.items():
             btn.setChecked(m == mode)
             btn.setStyleSheet(self._style(m == mode))
+
+    def _on_click(self, mode: str) -> None:
+        self.set_mode(mode)
+        cb = getattr(self, "_on_mode_changed", None)
+        if cb is not None:
+            cb(mode)
+
+
+class LightTypeIconRow(QWidget):
+    """Lamp model selector: Point / Sun / Spot / Area as icon buttons.
+
+    Lives in a row directly above the sphere, built like the preset cells
+    (glyph button + caption), since the lamp model visibly reshapes the orb.
+    Same interface as the old segmented row: ``mode()``, ``set_mode()`` and
+    the ``_on_mode_changed`` callback, so persistence and reset keep working.
+    """
+
+    MODES = ("Point", "Sun", "Spot", "Area")
+    GLYPHS = {"Point": "point", "Sun": "sun", "Spot": "spot", "Area": "area"}
+    TIPS = {
+        "Point": "Point: nearby lamp, brightness falls off with distance",
+        "Sun": "Sun: distant parallel light, no falloff",
+        "Spot": "Spot: cone beam with a soft edge",
+        "Area": "Area: broad panel, soft wrap",
+    }
+
+    def __init__(self, current: str = "Point", parent=None):
+        super().__init__(parent)
+        self._buttons = {}
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        row.addStretch(1)
+        for mode in self.MODES:
+            cell = QWidget()
+            cv = QVBoxLayout(cell)
+            cv.setContentsMargins(0, 0, 0, 0)
+            cv.setSpacing(1)
+            btn = ToolButton(Accent.NEUTRAL, checked=(mode == current),
+                             glyph=self.GLYPHS[mode])
+            _set_tooltip(btn, self.TIPS[mode])
+            btn.clicked.connect(lambda _c, m=mode: self._on_click(m))
+            cv.addWidget(btn, alignment=Qt.AlignCenter)
+            cap = QLabel(mode)
+            cap.setAlignment(Qt.AlignCenter)
+            cap.setStyleSheet("QLabel { color: #b9c3d2; font-size: 9px; }")
+            cv.addWidget(cap)
+            row.addWidget(cell, alignment=Qt.AlignCenter)
+            self._buttons[mode] = btn
+        row.addStretch(1)
+        self._current = current
+
+    def mode(self) -> str:
+        return self._current
+
+    def set_mode(self, mode: str) -> None:
+        if mode not in self.MODES:
+            return
+        self._current = mode
+        for m, btn in self._buttons.items():
+            btn.setChecked(m == mode)
 
     def _on_click(self, mode: str) -> None:
         self.set_mode(mode)
@@ -688,31 +818,33 @@ class SphereDocker(QDockWidget):
     }
 
     def _install_tooltip_style(self) -> None:
-        """Give tooltips a readable background and text colour.
+        """Give tooltips a readable background and text colour (issue #20).
 
-        Three attempts got this wrong before, and the reason is worth writing
-        down so it is not retried:
+        Five approaches all failed before, and the reason is worth writing
+        down so none of them is retried:
 
         * ``QApplication.setStyleSheet()`` replaces Krita's *entire* app
           stylesheet. Invasive, and it still did not style these tooltips.
-        * A ``QToolTip`` rule on the docker's own stylesheet is resolved against
-          the app palette for the actual colours, so it had no visible effect
-          either -- the rule was present on the widget and the tooltip rendered
-          transparent regardless.
+        * A ``QToolTip`` rule on the docker's own stylesheet had no visible
+          effect either -- the rule was present on the widget and the tooltip
+          rendered transparent regardless.
         * A palette set on the docker is likewise ignored, because a tooltip is
           its own top-level window and does not inherit the owner's palette.
         * Setting the two palette roles on QApplication *did* take -- they read
           back as #000000/#ffffff -- but the tooltip still rendered with no
           background. Krita's style paints tooltip windows itself rather than
           filling from those roles.
+        * Appending a ``QToolTip`` rule to the application's *existing*
+          stylesheet (marker ``/* Lumina tooltips */``) was verified present
+          and still changed nothing.
 
-        What actually works is appending a ``QToolTip`` rule to the
-        application's *existing* stylesheet. Appending, not replacing: an
-        earlier ``setStyleSheet`` call replaced Krita's whole app stylesheet,
-        which is invasive. Reading it first and adding one rule keeps
-        everything Krita set and wins by order -- later rules take precedence
-        at equal specificity. Guarded by a marker comment so a second docker
-        instance does not stack duplicate rules.
+        The fix that survives the style is per-tooltip rich text: every
+        ``setToolTip`` call goes through ``tooltip.set_tooltip``, which wraps
+        the text in a ``<div style='background-color:#000;color:#fff'>``. The
+        div background paints inside whatever box Qt draws, so it stays opaque
+        even when the outer ``QTipLabel`` does not. This method now only keeps
+        the palette + appended-rule passes as a fallback for any plain-text
+        tooltip that slips through.
 
         Timing matters more than the call itself: this runs from __init__,
         while Krita is still starting up, and Krita re-applies its own theme
@@ -741,8 +873,9 @@ class SphereDocker(QDockWidget):
         current = app.styleSheet() or ""
         if marker not in current:
             app.setStyleSheet(current + marker +
-                "QToolTip { background-color: #000000; color: #ffffff; "
-                "border: 1px solid #3a404e; padding: 4px 6px; }")
+                "QToolTip { background-color: %s; color: %s; "
+                "border: 1px solid %s; padding: 0px; }"
+                % (TOOLTIP_BG, TOOLTIP_FG, TOOLTIP_BORDER))
 
     def __init__(self):
         LOG.info("SphereDocker.__init__ START")
@@ -820,6 +953,18 @@ class SphereDocker(QDockWidget):
         self.contrast_row = LabeledSliderRow(Accent.NEUTRAL, "Contrast",
                                              int(round(_eng.contrast * 100)),
                                              hi=200)
+        # Exposure is the scene light level (all lamp energy scales with it),
+        # front and centre instead of buried in Advanced. It owns the same
+        # engine value as the Intensity row; the two mirror each other, so a
+        # preset, reset or load updates both and either handle drives both.
+        self.power_row = LabeledSliderRow(Accent.AMBER, "Exposure",
+                                          int(round(_eng.light_intensity * 100)),
+                                          hi=200)
+        _set_tooltip(self.hue_row, "Hue of the active target color")
+        _set_tooltip(self.saturation_row, "Saturation of the active target color")
+        _set_tooltip(self.light_row, "Brightness of the base target color")
+        _set_tooltip(self.contrast_row, "Sharpness of the light-to-shadow falloff (100 is neutral)")
+        _set_tooltip(self.power_row, "Scene light level: scales Sun, Point, Spot and Area together")
         LOG.info("4 primary slider rows created")
 
         # --- Advanced rows (collapsed by default) ---
@@ -831,7 +976,7 @@ class SphereDocker(QDockWidget):
         # Specular passes its value straight to set_shininess, which clamps to
         # 1..128, so the row spans exactly that.
         self.specular_row = LabeledSliderRow(Accent.CYAN, "Specular",
-                                             int(round(_eng.shininess)), lo=1, hi=128)
+                                             int(round(_eng.shininess)), lo=1, hi=64)
         # Diffuse is the other half of the highlight: Specular sets how wide the
         # sheen is, Diffuse how softly it falls off. They sit together so the
         # relationship is obvious rather than split across two panels.
@@ -841,6 +986,13 @@ class SphereDocker(QDockWidget):
         self.tone_row = LabeledSliderRow(Accent.GREEN, "Tone",
                                          int(round(_eng.saturation * 100)),
                                          hi=200)
+        _set_tooltip(self.color_row, "Overall brightness of the base color, preserves hue and saturation")
+        _set_tooltip(self.intensity_row, "Scene light level (mirrors Exposure)")
+        _set_tooltip(self.ambient_row, "Fill light softening the shadowed areas")
+        _set_tooltip(self.specular_row, "Highlight width: low is broad, high is tight")
+        _set_tooltip(self.diffuse_row, "Highlight falloff softness: high spreads the sheen")
+        _set_tooltip(self.glow_row, "Bloom on the lit areas")
+        _set_tooltip(self.tone_row, "Global saturation of the rendered result")
         # These four were never given an explicit range, so they sat on Qt's
         # default 0-99. Anything asking for 100 was silently clamped to 99 by
         # the widget, and the resulting valueChanged overwrote the engine value
@@ -849,6 +1001,8 @@ class SphereDocker(QDockWidget):
 
         self.mixer_row = MixerRow(self.processor.engine.mixer_mode)
         self.mixer_row._on_mode_changed = self._on_mixer_changed
+        self.light_type_row = LightTypeIconRow(self.processor.engine.light_type)
+        self.light_type_row._on_mode_changed = self._on_light_type_changed
         LOG.info("6 advanced slider rows + mixer created")
 
         # --- Preset buttons -------------------------------------------------
@@ -865,7 +1019,7 @@ class SphereDocker(QDockWidget):
             btn = ToolButton(preset["accent"], checked=(i == 0),
                              glyph=preset["glyph"])
             btn.key = preset["key"]
-            btn.setToolTip(preset["tip"])
+            _set_tooltip(btn, preset["tip"])
             btn.clicked.connect(
                 lambda _c, k=preset["key"]: self._on_preset_clicked(k, True))
             self._preset_btns.append(btn)
@@ -1207,23 +1361,24 @@ class SphereDocker(QDockWidget):
         The reference pairs every icon with the colour it controls, so the row
         reads at a glance as "shadow / base / highlight" with real values rather
         than three anonymous glyphs. Selection is shown on *both* halves of the
-        pair -- the glyph fills solid white and this dot takes a full white rim
-        -- while the dot's own fill stays the real target colour.
+        pair -- the glyph takes a smooth white ring and this dot a full white
+        rim -- while the dot's own fill stays the real target colour.
         """
 
-        # All three swatches are the same size. Growing the selected one made the
-        # row look like it contained a circle, a dot and a circle, and the
-        # reference keeps them uniform; the selection is shown by the ring.
-        SMALL = 20
-        LARGE = 20
+        # All three swatches share one box so the row never jumps. The disc
+        # itself grows when selected: small at rest, larger with the white
+        # rim when active.
+        BOX = 24
+        SMALL = 15
+        LARGE = 19
 
         def __init__(self, key: str, parent=None):
             super().__init__(parent)
             self.key = key
             self._color = QColor(120, 120, 120)
             self._active = False
-            self.setFixedSize(self.LARGE, self.LARGE)
-            self.setToolTip(SphereDocker.TARGET_LABELS.get(key, key))
+            self.setFixedSize(self.BOX, self.BOX)
+            _set_tooltip(self, SphereDocker.TARGET_LABELS.get(key, key))
             # Clickable, like the glyph beside it. The swatch is half the width
             # of the pair and sits closest to the pointer when you aim for the
             # colour itself, so making only the icon a target made the obvious
@@ -1252,19 +1407,20 @@ class SphereDocker(QDockWidget):
             p = QPainter(self)
             try:
                 p.setRenderHint(QPainter.Antialiasing, True)
+                # Inset by the rim half-width plus antialias margin: drawing
+                # edge-to-edge clipped the rim against the widget bounds and
+                # left flat, jagged edges. The active disc draws larger.
                 d = self.LARGE if self._active else self.SMALL
                 cx = cy = self.width() / 2.0
                 rect = QRectF(cx - d / 2.0, cy - d / 2.0, d, d)
                 p.setBrush(self._color)
-                # The rim is the selection mark, and it now matches the icon
-                # beside it: solid white when active, faint when not. Only the
-                # rim changes -- the fill always stays the target's real colour,
-                # which is the whole point of showing it here.
+                # The rim is the selection mark: solid white when active,
+                # faint when not. Only the rim changes -- the fill always
+                # stays the target's real colour, which is the whole point
+                # of showing it here.
                 #
-                # A hairline rim keeps a near-black shadow swatch legible against
-                # the dark panel. The selected rim is deliberately drawn at the
-                # swatch's own radius rather than outside it, so the pair keeps
-                # its uniform size instead of the active one growing.
+                # A hairline rim keeps a near-black shadow swatch legible
+                # against the dark panel.
                 if self._active:
                     p.setPen(QPen(QColor(255, 255, 255, 255), 2.0))
                 else:
@@ -1282,8 +1438,10 @@ class SphereDocker(QDockWidget):
         """Build the Lighting Orb panel (see issue #9 for the reference layout)."""
 
         class TargetBtn(QPushButton):
-            """Small selectable dot: crescent (shadow) / droplet (base) / sun (light).
+            """Small selectable dot: terminator (shadow) / ring (base) / rays (light).
 
+            One visual language for all three -- a dark-to-bright progression
+            on the same circle -- instead of three unrelated pictograms.
             The active target gets a light outer ring. The previous version drew a
             flat amber square because the pen state leaked between branches and
             the glyphs were drawn with the QSS border-radius, so every branch now
@@ -1299,7 +1457,7 @@ class SphereDocker(QDockWidget):
                 self.setCursor(Qt.PointingHandCursor)
                 self.setFocusPolicy(Qt.StrongFocus)
                 self.setCheckable(True)
-                self.setToolTip(SphereDocker.TARGET_LABELS.get(key, key))
+                _set_tooltip(self, SphereDocker.TARGET_LABELS.get(key, key))
                 # No QSS background: paintEvent draws everything itself.
                 self.setStyleSheet("QPushButton { background: transparent; border: none; }")
 
@@ -1308,86 +1466,45 @@ class SphereDocker(QDockWidget):
                 self.update()
 
             def paintEvent(self, event):
-                """Draw a thin monochrome outline glyph: crescent, droplet, sun.
+                """Draw the terminator-theme glyphs: half-dark / ring / rays.
 
-                The reference draws these as light, hairline outlines in a single
-                ink colour. They were previously solid shapes in three different
-                accent colours, and the "base" glyph was a filled disc with a
-                white centre -- a target, not a droplet -- so none of the three
-                read as the icon it stood for. Colour comes from the swatch
+                Shadow is a circle with its dark half filled (the terminator),
+                base is the plain ring (the object itself), light is the ring
+                with short rays (the lit side). Colour comes from the swatch
                 beside the glyph, so the glyph itself only has to say *which
-                role* it plays.
-
-                Selection is carried by the *fill*: the active glyph is filled
-                solid white, the inactive ones stay hollow. Filling is a much
-                stronger signal than tinting the stroke, and it is the one thing
-                the two can differ on without touching the palette.
+                role* it plays. Glyphs never take a selection mark -- that
+                lives on the color swatch alone.
                 """
                 try:
                     p = QPainter(self)
                     p.setRenderHint(QPainter.Antialiasing, True)
                     w, h = self.width(), self.height()
                     cx, cy = w / 2.0, h / 2.0
-                    # One ink for all three; only the brush differs by state.
+                    # One ink for all three; glyphs stay hollow either way.
                     ink = QColor(216, 224, 236)
-                    active = self.isChecked()
-                    stroke = QPen(ink, 1.9, Qt.SolidLine, Qt.RoundCap,
-                                  Qt.RoundJoin)
-                    p.setPen(stroke)
-                    p.setBrush(QColor(255, 255, 255) if active else Qt.NoBrush)
+                    p.setPen(QPen(ink, 1.9, Qt.SolidLine, Qt.RoundCap,
+                                  Qt.RoundJoin))
+                    p.setBrush(Qt.NoBrush)
 
                     if self.icon == "shadow":
-                        # Crescent: the sliver between two equal circles whose
-                        # centres are offset horizontally. Built as a closed
-                        # polygon from sampled arc points that meet exactly at
-                        # the circles' real intersections -- drawing two arcs
-                        # independently left them unjoined, which read as an
-                        # open "C" rather than a crescent.
-                        R, d, off = 9.0, 5.0, 2.0
-                        ox, ix = cx - off, cx - off + d
-                        h = math.sqrt(R * R - (d / 2.0) ** 2)
-                        a = math.degrees(math.atan2(h, d / 2.0))
-                        pts = []
-                        steps = 30
-                        # Outer circle, the long way round through its left side.
-                        for k in range(steps + 1):
-                            t = math.radians(-a + (-(360.0 - 2 * a)) * k / steps)
-                            pts.append(QPointF(ox + R * math.cos(t), cy + R * math.sin(t)))
-                        # Inner circle back again, also through its left side, so
-                        # the two arcs meet at exactly the same two points.
-                        for k in range(steps + 1):
-                            t = math.radians((180.0 - a) + (2 * a) * k / steps)
-                            pts.append(QPointF(ix + R * math.cos(t), cy + R * math.sin(t)))
-                        poly = QPolygonF(pts)
-                        # drawPolygon when selected so the crescent actually
-                        # fills; drawPolyline when not, which is what a hairline
-                        # outline wants. The point list is already a closed loop
-                        # (the two arcs meet at the same two points), so the
-                        # fill is the crescent sliver and not the whole disc.
-                        if active:
-                            p.drawPolygon(poly)
-                        else:
-                            p.drawPolyline(poly)
+                        # Terminator: outline circle with the dark half filled.
+                        p.drawEllipse(QRectF(cx - 5.5, cy - 5.5, 11.0, 11.0))
+                        p.setPen(Qt.NoPen)
+                        p.setBrush(ink)
+                        p.drawPie(QRectF(cx - 5.5, cy - 5.5, 11.0, 11.0),
+                                  90 * 16, 180 * 16)
                     elif self.icon == "base":
-                        # Droplet: pointed at the top, round at the bottom.
-                        path = QPainterPath()
-                        path.moveTo(cx, cy - 9.5)
-                        path.cubicTo(cx + 5.2, cy - 3.0, cx + 7.4, cy + 8.0,
-                                     cx, cy + 8.0)
-                        path.cubicTo(cx - 7.4, cy + 8.0, cx - 5.2, cy - 3.0,
-                                     cx, cy - 9.5)
-                        path.closeSubpath()
-                        p.drawPath(path)
+                        # The object itself: plain ring.
+                        p.drawEllipse(QRectF(cx - 5.5, cy - 5.5, 11.0, 11.0))
                     else:
-                        # Sun: a small disc with short rays around it. The disc
-                        # takes the fill so the glyph can read as selected; the
-                        # rays are strokes and stay strokes either way.
-                        p.drawEllipse(QRectF(cx - 4.6, cy - 4.6, 9.2, 9.2))
-                        for k in range(8):
-                            a = math.radians(k * 45.0)
+                        # Lit side: smaller ring with four short rays.
+                        p.drawEllipse(QRectF(cx - 4.4, cy - 4.4, 8.8, 8.8))
+                        for deg in (45.0, 135.0, 225.0, 315.0):
+                            a = math.radians(deg)
+                            dx, dy = math.cos(a), math.sin(a)
                             p.drawLine(
-                                QPointF(cx + math.cos(a) * 7.6, cy + math.sin(a) * 7.6),
-                                QPointF(cx + math.cos(a) * 10.4, cy + math.sin(a) * 10.4),
+                                QPointF(cx + dx * 6.2, cy + dy * 6.2),
+                                QPointF(cx + dx * 8.6, cy + dy * 8.6),
                             )
                     p.end()
                 except Exception as exc:  # pragma: no cover - cosmetic paint only
@@ -1435,11 +1552,11 @@ class SphereDocker(QDockWidget):
         header.setSpacing(6)
 
         # 1. Settings
-        # 1. Settings (gear). checkable=False: it is a momentary action that
-        # opens the settings popup, so it must not latch its highlight on.
-        gear = ToolButton(Accent.NEUTRAL, glyph="gear", size=HEADER_BTN,
-                          checkable=False)
-        gear.setToolTip("Settings: light direction, render quality, reset")
+        # 1. Settings (gear). Checkable so it lights up while the popup is
+        # open; _toggle_settings and the panel Hide/Show events keep the
+        # two in sync, including popup closes from outside clicks.
+        gear = ToolButton(Accent.NEUTRAL, glyph="gear", size=HEADER_BTN)
+        _set_tooltip(gear, "Settings: light direction, render quality, reset")
         gear.clicked.connect(self._toggle_settings)
         self._gear_btn = gear
         header.addWidget(gear)
@@ -1449,7 +1566,7 @@ class SphereDocker(QDockWidget):
         self._sw_prev.setMinimumSize(64, HEADER_BTN)
         self._sw_prev.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._sw_prev.setCursor(Qt.PointingHandCursor)
-        self._sw_prev.setToolTip("Previous color - click to step back")
+        _set_tooltip(self._sw_prev, "Previous color - click to step back")
         self._sw_prev.setStyleSheet(
             "QFrame { background-color: #3b414a; border-radius: 5px; }")
         self._sw_prev.mousePressEvent = self._on_prev_swatch_pressed
@@ -1461,15 +1578,15 @@ class SphereDocker(QDockWidget):
         self._sw_current.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._sw_current.setStyleSheet(
             "QFrame { background-color: #3b414a; border-radius: 5px; }")
-        self._sw_current.setToolTip("Active color")
+        _set_tooltip(self._sw_current, "Active color")
         self._sw_current.mousePressEvent = self._on_current_swatch_pressed
         header.addWidget(self._sw_current, 1)
 
         # 4. Color picker: hands over to Krita's own Color Sampler tool so the
-        # user can click any pixel on the canvas.
-        pick = ToolButton(Accent.CYAN, glyph="eyedropper", size=HEADER_BTN,
-                          checkable=False)
-        pick.setToolTip("Eyedropper: click a color on the canvas to sample it")
+        # user can click any pixel on the canvas. Checkable: lit while the
+        # sampler tool is active, cleared when the previous tool returns.
+        pick = ToolButton(Accent.CYAN, glyph="eyedropper", size=HEADER_BTN)
+        _set_tooltip(pick, "Eyedropper: click a color on the canvas to sample it")
         pick.clicked.connect(self._on_eyedropper_tool)
         self._eyedropper_btn = pick
         header.addWidget(pick)
@@ -1481,9 +1598,9 @@ class SphereDocker(QDockWidget):
         # ------------------------------------------------------------------
         orb_frame = QFrame()
         orb_layout = QVBoxLayout(orb_frame)
-        # Extra space directly under the gear / swatch / eyedropper row so the
-        # sphere is not crowded against the controls above it.
-        orb_layout.setContentsMargins(0, 12, 0, 0)
+        # Small gap under the gear / swatch / eyedropper row so the light
+        # icons are not crowded against the controls above them.
+        orb_layout.setContentsMargins(0, 6, 0, 0)
         orb_layout.setSpacing(2)
         self._orb.setFixedSize(ORB_SIZE, ORB_SIZE)
         # Fixed-size holder so the orb sits at a predictable size.
@@ -1522,6 +1639,11 @@ class SphereDocker(QDockWidget):
             col.addStretch(1)
             return col
 
+        # Lamp model sits directly above the sphere as icon buttons, like the
+        # preset cells: it visibly reshapes the orb, so it belongs with it
+        # rather than buried in Advanced.
+        orb_layout.addWidget(self.light_type_row)
+        orb_layout.addSpacing(6)
         orb_row = QHBoxLayout()
         orb_row.setContentsMargins(0, 0, 0, 0)
         orb_row.setSpacing(2)
@@ -1535,7 +1657,6 @@ class SphereDocker(QDockWidget):
         self._readout.setFixedHeight(14)
         self._readout.setStyleSheet(
             "QLabel { color: %s; font-size: 10px; }" % TEXT_DIM.name())
-        orb_layout.addWidget(self._readout)
         layout.addWidget(orb_frame)
 
         # ------------------------------------------------------------------
@@ -1574,7 +1695,12 @@ class SphereDocker(QDockWidget):
             target_row.addWidget(cell, alignment=Qt.AlignCenter)
             self._target_btns.append(btn)
         target_row.addStretch(1)
-        layout.addLayout(target_row)
+        # Dots live inside the orb frame, tucked under the sphere, with the
+        # hover readout below them.
+        orb_layout.addLayout(target_row)
+        orb_layout.addWidget(self._readout)
+        # Breathing room between the orb frame and the Hue slider.
+        layout.addSpacing(6)
 
         # ------------------------------------------------------------------
         # Primary sliders
@@ -1583,6 +1709,7 @@ class SphereDocker(QDockWidget):
         layout.addWidget(self.saturation_row)
         layout.addWidget(self.light_row)
         layout.addWidget(self.contrast_row)
+        layout.addWidget(self.power_row)
 
         # (Presets now flank the orb above, three per side, instead of a grid
         # here: at panel width the 3x2 grid pushed everything else down, and the
@@ -1625,8 +1752,8 @@ class SphereDocker(QDockWidget):
         # Settings popup lives on the main widget so it can position itself
         # against the gear button and close when clicking outside.
         self._settings_panel = SettingsPanel(
-            azimuth=int(self.processor.engine.light_azimuth_deg),
-            elevation=int(math.degrees(self.processor.engine.light_elevation_rad)),
+            azimuth=int(self.processor.engine.light_azimuth),
+            elevation=int(round(float(self.processor.engine.light_elevation))),
             quality=self._orb_render_size,
             highlight_size=self._shininess_to_size(
                 self.processor.engine.shininess),
@@ -1635,6 +1762,9 @@ class SphereDocker(QDockWidget):
                                   self._on_settings_save)
         self._settings_panel.apply_btn.clicked.connect(self._on_apply_selection)
         self._settings_panel.hide()
+        # Watch popup visibility so the gear highlight tracks outside-click
+        # closes too, not just presses on the gear itself.
+        self._settings_panel.installEventFilter(self)
 
         # Paint the initial state so the swatch / dots / gradients are correct
         # on the very first frame (previously _update_preview only ran on a
@@ -1730,6 +1860,15 @@ class SphereDocker(QDockWidget):
         # Kept so the widget still behaves as a normal filter if something calls
         # it directly, but the real installation goes through the singleton
         # proxy -- see _TitleBarDragFilter for why it cannot be this object.
+        if obj is getattr(self, "_settings_panel", None):
+            # Popup visibility drives the gear highlight, including closes
+            # from outside clicks that never pass through _toggle_settings.
+            et = event.type()
+            if et == QEvent.Show:
+                self._gear_btn.setChecked(True)
+            elif et == QEvent.Hide:
+                self._gear_btn.setChecked(False)
+            return False
         return self._handle_titlebar_event(obj, event)
 
     def _handle_titlebar_event(self, obj, event) -> bool:
@@ -1862,20 +2001,22 @@ class SphereDocker(QDockWidget):
             # with does not look like it was discarded.
             shown = self._chosen_color if self._chosen_color is not None else base
             self._set_swatch_color(self._sw_current, shown)
-            self._sw_current.setToolTip(
+            _set_tooltip(
+                self._sw_current,
                 "Active color %s - click to make this the new original" % shown.name())
             orig = self._original_color
             if orig is not None:
                 self._sw_prev.setStyleSheet(
                     "QFrame { background-color: %s; border-radius: 5px; "
                     "border: 1px solid rgba(255,255,255,70); }" % orig.name())
-                self._sw_prev.setToolTip(
+                _set_tooltip(
+                    self._sw_prev,
                     "Original color %s - click to revert" % orig.name())
             else:
                 self._sw_prev.setStyleSheet(
                     "QFrame { background-color: #22262f; border-radius: 5px; "
                     "border: 1px dashed rgba(255,255,255,50); }")
-                self._sw_prev.setToolTip("No original color yet")
+                _set_tooltip(self._sw_prev, "No original color yet")
         except Exception as exc:  # pragma: no cover - cosmetic only
             print(f"Lumina: update_preview failed - {exc}")
 
@@ -1898,6 +2039,7 @@ class SphereDocker(QDockWidget):
                 return
             if panel.isVisible():
                 panel.hide()
+                self._gear_btn.setChecked(False)
                 return
             # Anchor just below the gear button.
             gear = self._gear_btn
@@ -1916,6 +2058,7 @@ class SphereDocker(QDockWidget):
             panel.move(point)
             panel.show()
             panel.raise_()
+            self._gear_btn.setChecked(True)
         except Exception as exc:  # pragma: no cover - UI only
             LOG.exception("_toggle_settings failed")
             print(f"Lumina: toggle settings failed - {exc}")
@@ -1924,7 +2067,7 @@ class SphereDocker(QDockWidget):
         """Apply the settings panel's current values to the engine."""
         try:
             self.processor.set_light_angle(
-                int(state["azimuth"]), math.radians(float(state["elevation"])))
+                int(state["azimuth"]), float(state["elevation"]))
             self._orb_render_size = int(state["quality"])
             self._orb.set_show_pointer(bool(state["pointer"]))
             # Highlight size drives the same shininess as the Advanced
@@ -1965,8 +2108,9 @@ class SphereDocker(QDockWidget):
         """
         eng = self.processor.engine
         out = {
-            "azimuth": int(eng.light_azimuth_deg),
-            "elevation": int(round(math.degrees(eng.light_elevation_rad))),
+            "version": int(SETTINGS_VERSION),
+            "azimuth": int(eng.light_azimuth),
+            "elevation": int(round(float(eng.light_elevation))),
             "highlight_size": self._shininess_to_size(eng.shininess),
             "quality": int(getattr(self, "_orb_render_size", ORB_RENDER)),
             "sampler": bool(self._orb._show_pointer),
@@ -1975,9 +2119,11 @@ class SphereDocker(QDockWidget):
             "intensity": int(eng.light_intensity * 100.0),
             "ambient": int(eng.ambient * 100.0),
             "specular": int(eng.shininess),
+            "spec_max": int(round(float(getattr(eng, "spec_max", 0.24)) * 100.0)),
             "glow": int(eng.glow_intensity * 100.0),
-            "tone": int(eng.brightness * 100.0),
+            "tone": int(eng.saturation * 100.0),
             "mixer": str(eng.mixer_mode),
+            "light_type": str(eng.light_type),
             "base_level": int(self.color_row.value()),
         }
         for name, qc in self._targets.items():
@@ -2034,13 +2180,18 @@ class SphereDocker(QDockWidget):
                         qc = QColor(str(raw))
                         if qc.isValid():
                             self._targets[name] = qc
-                eng.set_light_angle(int(num("azimuth", 300, 0, 359)),
-                                    math.radians(num("elevation", 45, 0, 90)))
+                eng.set_light_angle(int(num("azimuth", 295, 0, 359)),
+                                    num("elevation", 70, 0, 90))
                 self._orb_render_size = int(num("quality", ORB_RENDER, 64, 512))
                 self._orb.set_show_pointer(str(s.value("sampler", "true")).lower()
                                            not in ("false", "0"))
-                self.processor.set_spec_knee(self._level_to_knee(
-                    int(num("diffuse", self._knee_to_level(SPEC_KNEE), 0, 100))))
+                saved_version = int(num("version", 1, 1, SETTINGS_VERSION))
+                raw_diffuse = int(num("diffuse", self._knee_to_level(SPEC_KNEE), 0, 100))
+                if saved_version < 4:
+                    # Old linear slider meaning -> old physical knee ->
+                    # equivalent new perceptual slider position.
+                    raw_diffuse = self._migrate_diffuse_level(raw_diffuse)
+                self.processor.set_spec_knee(self._level_to_knee(raw_diffuse))
                 # Contrast defaults to 100 -- the middle of the 0-200 slider,
                 # which is also the engine's no-op (1.0 = identity in the tone
                 # curve). Below or above that, tone mapping reshapes the falloff.
@@ -2052,10 +2203,22 @@ class SphereDocker(QDockWidget):
                 # highlight-size slider drives the same engine value, but it is
                 # mapped from it at sync time rather than read separately, so the
                 # two controls can never disagree about what is saved.
-                self.processor.set_shininess(num("specular", 2, 1, 128))
+                self.processor.set_shininess(num("specular", 8, 1, 128))
                 self.processor.set_glow_intensity(num("glow", 0, 0, 100) / 100.0)
-                self.processor.set_brightness(num("tone", 100, 0, 200) / 100.0)
+                # v1 stored Tone as brightness; do not reinterpret old
+                # brightness as saturation. v2+ stores saturation correctly.
+                if saved_version < 2:
+                    self.processor.set_saturation(1.0)
+                else:
+                    self.processor.set_saturation(num("tone", 100, 0, 200) / 100.0)
+                # v3+ persists spec_max; older settings keep baseline 0.24.
+                if saved_version < 3:
+                    self.processor.set_spec_max(0.24)
+                else:
+                    self.processor.set_spec_max(num("spec_max", 24, 0, 100) / 100.0)
                 self.processor.set_mixer_mode(str(s.value("mixer", "Blended")))
+                self.processor.set_light_type(str(s.value("light_type", "Point")))
+                self.light_type_row.set_mode(str(s.value("light_type", "Point")))
                 self.color_row.set_value(int(num("base_level", 100, 0, 100)))
 
                 # Push the restored numbers back into the widgets, still inside
@@ -2065,10 +2228,11 @@ class SphereDocker(QDockWidget):
                 self.diffuse_row.set_value(self._knee_to_level(eng.spec_knee))
                 self.contrast_row.set_value(int(eng.contrast * 100.0))
                 self.intensity_row.set_value(int(eng.light_intensity * 100.0))
+                self.power_row.set_value(int(eng.light_intensity * 100.0))
                 self.ambient_row.set_value(int(eng.ambient * 100.0))
                 self.specular_row.set_value(int(eng.shininess))
                 self.glow_row.set_value(int(eng.glow_intensity * 100.0))
-                self.tone_row.set_value(int(eng.brightness * 100.0))
+                self.tone_row.set_value(int(eng.saturation * 100.0))
                 self._sync_settings_panel()
                 self._sync_target_buttons()
                 self._sync_sliders_from_state()
@@ -2093,8 +2257,8 @@ class SphereDocker(QDockWidget):
         try:
             eng = self.processor.engine
             self._settings_panel.sync_from(
-                int(eng.light_azimuth_deg),
-                int(round(math.degrees(eng.light_elevation_rad))),
+                int(eng.light_azimuth),
+                int(round(float(eng.light_elevation))),
                 self._shininess_to_size(eng.shininess),
                 int(getattr(self, "_orb_render_size", ORB_RENDER)),
                 bool(self._orb._show_pointer),
@@ -2111,9 +2275,11 @@ class SphereDocker(QDockWidget):
                 self._targets[key] = QColor(col)
                 self._hue_memory[key] = QColor(col).getHsvF()[0]
             self._active_target = "base"
-            self.processor.set_light_angle(300.0, math.radians(45.0))
+            self.processor.set_light_angle(295.0, 70.0)
             self.processor.set_mixer_mode("Blended")
             self.mixer_row.set_mode("Blended")
+            self.processor.set_light_type("Point")
+            self.light_type_row.set_mode("Point")
             # Set the slider, not the engine: the row's valueChanged handler
             # applies it to the engine, so both end up at 100 together. Calling
             # _on_contrast_changed directly updated the engine but left the
@@ -2131,8 +2297,9 @@ class SphereDocker(QDockWidget):
                 eng = self.processor
                 eng.set_ambient(0.10)
                 eng.set_light_intensity(1.0)
-                eng.set_shininess(2)
+                eng.set_shininess(SHININESS_REF)
                 eng.set_spec_knee(SPEC_KNEE)
+                eng.set_spec_max(0.24)
                 eng.set_glow_intensity(0.0)
                 eng.set_brightness(1.0)
                 eng.set_saturation(1.0)
@@ -2141,7 +2308,19 @@ class SphereDocker(QDockWidget):
                 self.color_row.set_value(100)
                 self.ambient_row.set_value(10)
                 self.intensity_row.set_value(100)
-                self.specular_row.set_value(2)
+                self.power_row.slider.blockSignals(True)
+                try:
+                    self.power_row.set_value(100)
+                finally:
+                    self.power_row.slider.blockSignals(False)
+                # Blocked: _on_specular_changed has no _syncing guard, so
+                # setting the row would push its value straight back into the
+                # engine and undo SHININESS_REF restored above.
+                self.specular_row.slider.blockSignals(True)
+                try:
+                    self.specular_row.set_value(int(SHININESS_REF))
+                finally:
+                    self.specular_row.slider.blockSignals(False)
                 self.diffuse_row.set_value(self._knee_to_level(SPEC_KNEE))
                 self.glow_row.set_value(0)
                 self.tone_row.set_value(100)
@@ -2187,6 +2366,7 @@ class SphereDocker(QDockWidget):
         # Advanced rows drive the engine directly.
         self.color_row.slider.valueChanged.connect(self._on_color_changed)
         self.intensity_row.slider.valueChanged.connect(self._on_intensity_changed)
+        self.power_row.slider.valueChanged.connect(self._on_power_changed)
         self.ambient_row.slider.valueChanged.connect(self._on_ambient_changed)
         self.specular_row.slider.valueChanged.connect(self._on_specular_changed)
         self.diffuse_row.slider.valueChanged.connect(self._on_diffuse_changed)
@@ -2349,6 +2529,15 @@ class SphereDocker(QDockWidget):
         except Exception as exc:
             LOG.exception("_on_mixer_changed failed")
 
+    def _on_light_type_changed(self, mode: str) -> None:
+        """Lamp model driving illuminance (Point/Sun/Spot/Area)."""
+        try:
+            LOG.info("_on_light_type_changed mode=%s", mode)
+            self.processor.set_light_type(mode)
+            self._rebuild_orb()
+        except Exception as exc:
+            LOG.exception("_on_light_type_changed failed")
+
     def _on_tone_changed(self, value):
         """Advanced: global render saturation (engine tone, not a target color)."""
         try:
@@ -2358,11 +2547,33 @@ class SphereDocker(QDockWidget):
         except Exception as exc:
             LOG.exception("_on_tone_changed failed")
 
+    def _set_light_power(self, percent: int) -> None:
+        """Drive sun power from either slider; the other mirrors it silently."""
+        try:
+            self.processor.set_light_intensity(percent / 100.0)
+            for row in (self.power_row, self.intensity_row):
+                if row.slider.value() != percent:
+                    row.slider.blockSignals(True)
+                    try:
+                        row.set_value(percent)
+                    finally:
+                        row.slider.blockSignals(False)
+            self._rebuild_orb()
+        except Exception as exc:  # pragma: no cover - UI only
+            LOG.exception("_set_light_power failed")
+            print(f"Lumina: set light power failed - {exc}")
+
+    def _on_power_changed(self, value):
+        try:
+            LOG.info(f"_on_power_changed value={value}")
+            self._set_light_power(value)
+        except Exception as exc:  # pragma: no cover - UI only
+            LOG.exception("_on_power_changed failed")
+
     def _on_intensity_changed(self, value):
         try:
             LOG.info(f"_on_intensity_changed value={value}")
-            self.processor.set_light_intensity(value / 100.0)
-            self._rebuild_orb()
+            self._set_light_power(value)
         except Exception as exc:
             LOG.exception("_on_intensity_changed failed")
 
@@ -2402,33 +2613,53 @@ class SphereDocker(QDockWidget):
     def _level_to_knee(level: int) -> float:
         """Map the Diffuse slider (0-100) onto the specular knee.
 
-        Inverted, because the underlying parameter runs the other way: a *low*
-        knee is the diffuse look, so slider 100 -> SPEC_KNEE_MIN.
+        Inverted: low knee is the diffuse look, so slider 100 -> SPEC_KNEE_MIN.
+        Perceptual (exponent 1.35) for the 0.02-0.95 domain: more resolution
+        at low knee values. Starting calibration, validate visually at
+        0/25/50/75/100 for dead ranges.
         """
+        import math
         t = max(0.0, min(1.0, level / 100.0))
-        return SPEC_KNEE_MAX - t * (SPEC_KNEE_MAX - SPEC_KNEE_MIN)
+        return SPEC_KNEE_MIN + (SPEC_KNEE_MAX - SPEC_KNEE_MIN) * ((1.0 - t) ** 1.35)
 
     @staticmethod
     def _knee_to_level(knee: float) -> int:
         """Inverse of :meth:`_level_to_knee`, for restoring a saved value."""
+        import math
         k = max(SPEC_KNEE_MIN, min(SPEC_KNEE_MAX, knee))
-        return int(round((SPEC_KNEE_MAX - k) / (SPEC_KNEE_MAX - SPEC_KNEE_MIN) * 100))
+        t = 1.0 - ((k - SPEC_KNEE_MIN) / (SPEC_KNEE_MAX - SPEC_KNEE_MIN)) ** (1.0 / 1.35)
+        return int(round(max(0.0, min(1.0, t)) * 100))
+
+    @staticmethod
+    def _migrate_diffuse_level(old_level: int) -> int:
+        """Map a pre-v4 linear Diffuse slider position to the new curve.
+
+        Old: knee = MAX - t*range (linear). New: perceptual exponent 1.35.
+        Recover the old physical knee, then find the equivalent new position
+        so existing users keep approximately their old look.
+        """
+        t_old = max(0.0, min(1.0, old_level / 100.0))
+        old_knee = SPEC_KNEE_MAX - t_old * (SPEC_KNEE_MAX - SPEC_KNEE_MIN)
+        return SphereDocker._knee_to_level(old_knee)
 
     @staticmethod
     def _size_to_shininess(level: int) -> float:
-        """Map the gear's 0-100 highlight size onto engine shininess (128-1).
+        """Map the gear's 0-100 highlight size onto engine shininess 1-64.
 
-        Inverted, because the engine parameter runs the other way: a *high*
-        shininess is a pinpoint highlight, so size 100 -> shininess 1.
+        Inverted and perceptual (t^2): size 100 is broadest (shininess 1),
+        size 0 is tightest (64). More control in the broad region where
+        painters adjust most. Authoritative domain is 1-64.
         """
         t = max(0.0, min(1.0, level / 100.0))
-        return max(1.0, min(128.0, 128.0 - t * 127.0))
+        return 1.0 + (64.0 - 1.0) * ((1.0 - t) ** 2.0)
 
     @staticmethod
     def _shininess_to_size(shininess: float) -> int:
         """Inverse of :meth:`_size_to_shininess`, for restoring a saved value."""
-        s = max(1.0, min(128.0, shininess))
-        return int(round((128.0 - s) / 127.0 * 100))
+        import math
+        s = max(1.0, min(64.0, shininess))
+        t = 1.0 - math.sqrt((s - 1.0) / 63.0)
+        return int(round(max(0.0, min(1.0, t)) * 100))
 
     def _on_glow_changed(self, value):
         try:
@@ -2493,6 +2724,8 @@ class SphereDocker(QDockWidget):
                 setter(values[name] / 100.0)
         if "contrast" in values:
             p.set_contrast(values["contrast"] / 100.0)
+        if "spec_max" in values:
+            p.set_spec_max(values["spec_max"] / 100.0)
         if "specular" in values:
             p.set_shininess(values["specular"])
             # The gear's highlight-size slider owns the same engine value.
@@ -2512,6 +2745,7 @@ class SphereDocker(QDockWidget):
             self.mixer_row.set_mode(values["mixer"])
         for name, row in (("ambient", self.ambient_row),
                           ("intensity", self.intensity_row),
+                          ("intensity", self.power_row),
                           ("contrast", self.contrast_row),
                           ("specular", self.specular_row),
                           ("diffuse", self.diffuse_row),
@@ -2850,10 +3084,12 @@ class SphereDocker(QDockWidget):
             self._sampler_prev_tool = self._active_tool_name(app)
             self._start_sampler_watch()
             action.trigger()
+            self._eyedropper_btn.setChecked(True)
             LOG.info("color sampler tool activated (returning to %s afterwards)",
                      self._sampler_prev_tool)
         except Exception as exc:  # pragma: no cover - Krita-only path
             self._awaiting_sampler = False
+            self._eyedropper_btn.setChecked(False)
             LOG.exception("_on_eyedropper_tool failed")
             print(f"Lumina: eyedropper tool failed - {exc}")
 
@@ -2879,7 +3115,8 @@ class SphereDocker(QDockWidget):
             for a in app.actions():
                 if a.objectName() == name:
                     a.trigger()
-                    LOG.info("returned to tool %s; eyedropper still armed", name)
+                    self._eyedropper_btn.setChecked(False)
+                    LOG.info("returned to tool %s after sampler pick", name)
                     # Re-arm so the next canvas click samples again.
                     self._start_sampler_watch()
                     return

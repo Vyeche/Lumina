@@ -107,6 +107,10 @@ def test_symmetry():
     p = engine.ColorEngine(resolution=128)
     # Angled light -> a real left-right gradient to test symmetry on.
     p.set_light_angle(90.0, math.pi / 4)
+    # Grain off: the limb breakup is per-pixel noise and is asymmetric by
+    # design. This test covers the underlying lighting gradient, which must
+    # stay symmetric; the grain overlay has its own determinism checks.
+    p.set_grain(0.0)
     img = p.render((0.5, 0.5, 0.5), 64, 64)
     w = 64
     for row in range(10, 54):          # interior rows (stay inside hemisphere)
@@ -273,12 +277,42 @@ def test_dark_base_derivation():
     print("  ✓ low-saturation greys stay low-saturation, as the pick had them")
 
 
+def test_no_complex_crash():
+    """Bright pick + contrast must never produce complex pixels (Matte crash).
+
+    The tone-mapping curve raises (1 - luma) to a fractional power; once the
+    specular core pushes luma past 1 that base goes negative, which is complex
+    in Python and crashed round() in _rgb_from_floats. The bases are clamped
+    at zero now -- over-bright maps to over-bright. Sweeps the full slider
+    extremes, not just the reported combo.
+    """
+    engine = load_module("color_engine", "src/Lumina/color_engine.py")
+    n = 0
+    for base in [(1.0, 0.15, 0.70), (1.0, 1.0, 1.0), (0.9, 0.45, 0.15)]:
+        for contrast in [0.0, 0.5, 0.82, 1.5, 3.0]:
+            for intensity in [0.0, 1.0, 2.0]:
+                for shininess in [1, 8, 128]:
+                    p = engine.ColorEngine(resolution=32)
+                    p.set_contrast(contrast)
+                    p.set_light_intensity(intensity)
+                    p.set_shininess(shininess)
+                    img = p.render(base, 32, 32)
+                    for row in img:
+                        for px in row:
+                            assert all(isinstance(c, int) for c in px), \
+                                "non-int pixel %r (base=%s c=%s i=%s s=%s)" % (
+                                    px, base, contrast, intensity, shininess)
+                    n += 1
+    print("  ✓ %d bright/contrast/intensity combos render real pixels" % n)
+
+
 def main():
     print("Running Lumina shading tests...\n")
     test_engine_gradient()
     test_processor_delegation()
     test_symmetry()
     test_dark_base_derivation()
+    test_no_complex_crash()
     print("\nALL SHADING TESTS PASSED ✅")
 
 
