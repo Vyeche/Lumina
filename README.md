@@ -43,7 +43,11 @@ what those same values look like rendered rather than banded.
 
 ## Installation
 
-The plugin runs inside the Krita flatpak. From the repository root:
+**From a release:** download the `Lumina-*.zip` file, then in Krita go to
+**Tools → Scripts → Import Python Plugin from File** and select the zip —
+import it directly, no need to extract anything. Then restart Krita.
+
+**From source** (the plugin runs inside the Krita flatpak). From the repository root:
 
 ```bash
 DEPLOY="$HOME/.var/app/org.kde.krita/data/krita/pykrita"
