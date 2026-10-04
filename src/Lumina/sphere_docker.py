@@ -28,22 +28,28 @@ import weakref
 from typing import Callable, Optional
 
 from PyQt5.QtCore import (Qt, QEvent, QObject, QPoint, QPointF, QRectF, QSettings,
-                         QTimer, pyqtSlot)
+                         QTimer)
 from PyQt5.QtGui import (QColor, QPainter, QLinearGradient, QPixmap, QImage, QIcon,
                          QFont, QFontMetricsF, QPen, QPainterPath, QPolygonF,
                          QPalette)
 from PyQt5.QtWidgets import (
     QAbstractButton, QApplication, QDockWidget, QWidget, QVBoxLayout, QGridLayout,
-    QHBoxLayout, QLabel, QPushButton, QFrame, QSizePolicy, QLayout, QScrollArea
+    QHBoxLayout, QLabel, QLineEdit, QPushButton, QFrame, QSizePolicy, QLayout, QScrollArea
 )
 
 # `krita` provides the docker-factory registration API (Krita, DockWidgetFactory,
-# DockWidgetFactoryBase). These live in the `krita` module, NOT QtWidgets.
+# DockWidgetFactoryBase) and the DockWidget base class. These live in the
+# `krita` module, NOT QtWidgets.
 # The stale `DockWidget` reference here is exactly why the module failed to load.
 try:
-    from krita import Krita, DockWidgetFactory, DockWidgetFactoryBase
+    from krita import Krita, DockWidgetFactory, DockWidgetFactoryBase, DockWidget
 except ImportError:
     Krita = DockWidgetFactory = DockWidgetFactoryBase = None
+    # Off-host fallback (tests, standalone): plain QDockWidget. Inside Krita
+    # the real base is required -- it carries the KoCanvasObserverBase
+    # plumbing, so subclassing QDockWidget directly logs "is not a canvas
+    # observer" and canvasChanged() never fires.
+    DockWidget = QDockWidget
 
 from .color_processor import SphereColorProcessor
 from .color_engine import SPEC_KNEE, SPEC_KNEE_MIN, SPEC_KNEE_MAX
@@ -78,9 +84,9 @@ except Exception as exc:  # pragma: no cover - logging must never break the plug
 # Constants
 # ---------------------------------------------------------------------------
 # Highlight-size endpoints for the gear popup, in engine shininess. The
-# reference's satin sheen is SHININESS_REF; above SHININESS_MAX the lobe is a
-# hard dot rather than a highlight.
-SHININESS_REF = 8.0
+# Default satin sheen, chosen so the gear highlight-size slider rests
+# at 80: shininess = 1 + 63*(1-0.80)^2 = 3.52.
+SHININESS_REF = 3.52
 SHININESS_MAX = 64.0
 ORB_SIZE = 200          # diameter of the circular orb
 ORB_RENDER = 200        # engine render resolution (square)
@@ -166,37 +172,37 @@ _PRESETS = (
      "accent": Accent.AMBER,
      "tip": "Artistic: bright white highlights, high contrast",
      "values": {"highlight": (1.0, 0.86, 0.72), "ambient": 12, "intensity": 100,
-                "contrast": 120, "specular": 8, "diffuse": 72, "glow": 0,
+                "contrast": 112, "specular": 8, "diffuse": 72, "glow": 0,
                 "tone": 100, "mixer": "Blended", "spec_max": 24}},
     {"key": "real", "label": "Real", "glyph": "layers",
      "accent": Accent.PURPLE,
      "tip": "Real-world: warm highlights, soft natural contrast",
      "values": {"highlight": (1.0, 1.0, 1.0), "ambient": 10, "intensity": 100,
-                "contrast": 90, "specular": 12, "diffuse": 72, "glow": 0,
+                "contrast": 92, "specular": 12, "diffuse": 72, "glow": 0,
                 "tone": 100, "mixer": "Blended", "spec_max": 20}},
     {"key": "nocturne", "label": "Nocturne", "glyph": "moon",
      "accent": Accent.BLUE,
      "tip": "Nocturne: low key, cool moonlight, deep shadow",
      "values": {"highlight": (0.65, 0.75, 1.0), "ambient": 4, "intensity": 92,
-                "contrast": 135, "specular": 8, "diffuse": 45, "glow": 0,
+                "contrast": 118, "specular": 8, "diffuse": 45, "glow": 0,
                 "tone": 88, "mixer": "Blended", "spec_max": 18}},
     {"key": "gloss", "label": "Gloss", "glyph": "gloss",
      "accent": Accent.CYAN,
      "tip": "Gloss: tight bright highlight, slick and punchy",
      "values": {"highlight": (1.0, 1.0, 1.0), "ambient": 8, "intensity": 100,
-                "contrast": 118, "specular": 28, "diffuse": 30, "glow": 12,
+                "contrast": 110, "specular": 28, "diffuse": 30, "glow": 12,
                 "tone": 105, "mixer": "Blended", "spec_max": 24}},
     {"key": "matte", "label": "Matte", "glyph": "disc",
      "accent": Accent.NEUTRAL,
      "tip": "Matte: even clay-like falloff, no specular hotspot",
      "values": {"highlight": (0.94, 0.94, 0.92), "ambient": 12, "intensity": 100,
-                "contrast": 82, "specular": 5, "diffuse": 100, "glow": 0,
+                "contrast": 85, "specular": 5, "diffuse": 100, "glow": 0,
                 "tone": 96, "mixer": "Blended", "spec_max": 10}},
     {"key": "neon", "label": "Neon", "glyph": "bolt",
      "accent": Accent.GREEN,
      "tip": "Neon: saturated and blooming, coloured light",
      "values": {"highlight": (0.80, 1.0, 1.0), "ambient": 3, "intensity": 100,
-                "contrast": 125, "specular": 12, "diffuse": 55, "glow": 35,
+                "contrast": 114, "specular": 12, "diffuse": 55, "glow": 28,
                 "tone": 118, "mixer": "Additive", "spec_max": 28}},
 )
 
@@ -276,12 +282,37 @@ QToolTip {{
 # ---------------------------------------------------------------------------
 # Small helper widgets
 # ---------------------------------------------------------------------------
+def parse_typed_slider_value(text, lo, hi):
+    """Parse a typed slider readout: '86%' is percent-of-range, else raw.
+
+    Pure function (no Qt) so the parsing contract is unit-testable without
+    a display. Returns the clamped int, or None when the text is not a
+    number at all (caller reverts to the slider's value).
+    """
+    try:
+        text = text.strip()
+        if text.endswith("%"):
+            frac = max(0.0, min(100.0, float(text[:-1]))) / 100.0
+            return int(round(lo + frac * (hi - lo)))
+        return max(lo, min(hi, int(round(float(text)))))
+    except (TypeError, ValueError):
+        return None
+
+
+def format_slider_value(v, percent):
+    """Display text for a slider value. Pure function for the same reason."""
+    if percent:
+        return "%d%%" % int(v)
+    return str(int(v))
+
+
 class LabeledSliderRow(QWidget):
     """A single-row control: accent dot + icon label + color-coded slider."""
 
     def __init__(self, accent: Accent, label: str, value: int = 50, parent=None,
-                 lo: int = 0, hi: int = 100):
+                 lo: int = 0, hi: int = 100, percent: bool = True):
         super().__init__(parent)
+        self._percent = percent
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(10)
@@ -315,11 +346,46 @@ class LabeledSliderRow(QWidget):
         self.slider.setValue(value)
         layout.addWidget(self.slider, 1)
 
+        # Live value readout at the right end, like the settings sliders:
+        # percent for percent rows, the raw number for Hue (0-359) and
+        # Specular (1-64) where a % sign would lie. Click to type a value:
+        # a trailing % means percent-of-range, otherwise the raw number.
+        self._value = QLineEdit()
+        self._value.setFixedWidth(40)
+        self._value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._value.setFrame(False)
+        # Light backdrop marks it editable; brightens on hover/focus.
+        self._value.setStyleSheet(
+            f"QLineEdit {{ color: {TEXT_DIM.name()}; font-size: 10px; "
+            f"background: #262b35; border-radius: 3px; padding-right: 2px; }}"
+            f"QLineEdit:hover {{ background: #2e3440; }}"
+            f"QLineEdit:focus {{ background: #333a48; color: #e7eaf2; }}"
+        )
+        layout.addWidget(self._value)
+        self.slider.valueChanged.connect(
+            lambda v: self._value.setText(self._format_value(v)))
+        self._value.setText(self._format_value(value))
+        self._value.editingFinished.connect(self._on_value_typed)
+
+    def _format_value(self, v) -> str:
+        return format_slider_value(v, self._percent)
+
+    def _on_value_typed(self) -> None:
+        """Commit a typed value: '85%' is percent-of-range, '85' is raw."""
+        value = parse_typed_slider_value(self._value.text(), self.slider.minimum(), self.slider.maximum())
+        if value is None:
+            self._value.setText(self._format_value(self.slider.value()))
+        else:
+            self.set_value(value)
+
     def value(self) -> int:
         return self.slider.value()
 
     def set_value(self, value: int) -> None:
         self.slider.setValue(value)
+        # setValue with blocked signals (reset/sync paths) skips
+        # valueChanged, so refresh the readout explicitly.
+        self._value.setText(self._format_value(value))
 
     def set_caption(self, text: str) -> None:
         """Change the row's label, keeping the caption width stable.
@@ -782,7 +848,7 @@ class LightTypeIconRow(QWidget):
             cb(mode)
 
 
-class SphereDocker(QDockWidget):
+class SphereDocker(DockWidget):
     """The Lumina docker with a compact, icon-driven vertical sidebar.
 
     The panel follows the Infinite Painter "Lighting Orb" layout (see issue #9):
@@ -804,7 +870,7 @@ class SphereDocker(QDockWidget):
     DEFAULT_TARGETS = {
         "shadow": QColor(62, 66, 96),     # cool bounce: shadows are rarely black
         "base":   QColor(205, 92, 92),    # the object itself
-        "light":  QColor(248, 206, 132),  # key light
+        "light":  QColor(157, 65, 102),   # key light
     }
     TARGET_ACCENT = {
         "shadow": QColor(120, 140, 205),
@@ -901,6 +967,7 @@ class SphereDocker(QDockWidget):
         self._picked_hue = None
         self._active_target = "base"
         self._syncing = False
+        self._settings_restored = False  # set when _load_settings finds saved state
         self._sync_guard = False       # blocks our own foreground echo
         self._awaiting_sampler = False # next canvas sample comes from the eyedropper
         self._sampler_timer = None
@@ -942,7 +1009,8 @@ class SphereDocker(QDockWidget):
         # handle position did not describe the state being rendered and the
         # first drag produced a large jump from an unrelated starting point.
         _eng = self.processor.engine
-        self.hue_row = LabeledSliderRow(Accent.NEUTRAL, "Hue", 0, hi=359)
+        self.hue_row = LabeledSliderRow(Accent.NEUTRAL, "Hue", 0, hi=359,
+                                        percent=False)
         self.saturation_row = LabeledSliderRow(Accent.NEUTRAL, "Saturation", 0)
         # Light (HSV value) belongs to the base target only. The shadow and
         # light targets deliberately keep just Hue and Saturation: they are
@@ -976,7 +1044,8 @@ class SphereDocker(QDockWidget):
         # Specular passes its value straight to set_shininess, which clamps to
         # 1..128, so the row spans exactly that.
         self.specular_row = LabeledSliderRow(Accent.CYAN, "Specular",
-                                             int(round(_eng.shininess)), lo=1, hi=64)
+                                             int(round(_eng.shininess)), lo=1, hi=64,
+                                             percent=False)
         # Diffuse is the other half of the highlight: Specular sets how wide the
         # sheen is, Diffuse how softly it falls off. They sit together so the
         # relationship is obvious rather than split across two panels.
@@ -1040,6 +1109,10 @@ class SphereDocker(QDockWidget):
         self._watch_krita_colors()
         LOG.info("external color sync armed (%d watcher(s))" % len(self._krita_connections))
         self._start_sampler_watch()
+        if not getattr(self, "_settings_restored", False):
+            # First run: harmonize the default trio from the base color
+            # instead of three fixed swatches.
+            self._distribute_from(QColor(self._targets["base"]))
         self._rebuild_orb()
         LOG.info("SphereDocker.__init__ COMPLETE")
 
@@ -2158,6 +2231,7 @@ class SphereDocker(QDockWidget):
             s = _settings()
             if s.allKeys() == []:
                 return
+            self._settings_restored = True
             eng = self.processor.engine
 
             def num(key, default, lo=None, hi=None):
@@ -2180,8 +2254,8 @@ class SphereDocker(QDockWidget):
                         qc = QColor(str(raw))
                         if qc.isValid():
                             self._targets[name] = qc
-                eng.set_light_angle(int(num("azimuth", 295, 0, 359)),
-                                    num("elevation", 70, 0, 90))
+                eng.set_light_angle(int(num("azimuth", 287, 0, 359)),
+                                    num("elevation", 45, 0, 90))
                 self._orb_render_size = int(num("quality", ORB_RENDER, 64, 512))
                 self._orb.set_show_pointer(str(s.value("sampler", "true")).lower()
                                            not in ("false", "0"))
@@ -2195,7 +2269,7 @@ class SphereDocker(QDockWidget):
                 # Contrast defaults to 100 -- the middle of the 0-200 slider,
                 # which is also the engine's no-op (1.0 = identity in the tone
                 # curve). Below or above that, tone mapping reshapes the falloff.
-                self.processor.set_contrast(num("contrast", 100, 0, 300) / 100.0)
+                self.processor.set_contrast(num("contrast", 100, 0, 200) / 100.0)
                 self.processor.set_light_intensity(
                     num("intensity", 100, 0, 200) / 100.0)
                 self.processor.set_ambient(num("ambient", 10, 0, 100) / 100.0)
@@ -2203,7 +2277,7 @@ class SphereDocker(QDockWidget):
                 # highlight-size slider drives the same engine value, but it is
                 # mapped from it at sync time rather than read separately, so the
                 # two controls can never disagree about what is saved.
-                self.processor.set_shininess(num("specular", 8, 1, 128))
+                self.processor.set_shininess(num("specular", 3.52, 1, 128))
                 self.processor.set_glow_intensity(num("glow", 0, 0, 100) / 100.0)
                 # v1 stored Tone as brightness; do not reinterpret old
                 # brightness as saturation. v2+ stores saturation correctly.
@@ -2217,8 +2291,8 @@ class SphereDocker(QDockWidget):
                 else:
                     self.processor.set_spec_max(num("spec_max", 24, 0, 100) / 100.0)
                 self.processor.set_mixer_mode(str(s.value("mixer", "Blended")))
-                self.processor.set_light_type(str(s.value("light_type", "Point")))
-                self.light_type_row.set_mode(str(s.value("light_type", "Point")))
+                self.processor.set_light_type(str(s.value("light_type", "Sun")))
+                self.light_type_row.set_mode(str(s.value("light_type", "Sun")))
                 self.color_row.set_value(int(num("base_level", 100, 0, 100)))
 
                 # Push the restored numbers back into the widgets, still inside
@@ -2271,15 +2345,16 @@ class SphereDocker(QDockWidget):
         try:
             self._original_color = QColor(self.DEFAULT_TARGETS["base"])
             self._chosen_color = None
-            for key, col in self.DEFAULT_TARGETS.items():
-                self._targets[key] = QColor(col)
-                self._hue_memory[key] = QColor(col).getHsvF()[0]
+            # Base comes from the defaults; light and shadow are harmonized
+            # from it below, so the reset trio always reads as one scheme.
+            self._targets["base"] = QColor(self.DEFAULT_TARGETS["base"])
+            self._hue_memory["base"] = QColor(self.DEFAULT_TARGETS["base"]).getHsvF()[0]
             self._active_target = "base"
-            self.processor.set_light_angle(295.0, 70.0)
+            self.processor.set_light_angle(287.0, 45.0)
             self.processor.set_mixer_mode("Blended")
             self.mixer_row.set_mode("Blended")
-            self.processor.set_light_type("Point")
-            self.light_type_row.set_mode("Point")
+            self.processor.set_light_type("Sun")
+            self.light_type_row.set_mode("Sun")
             # Set the slider, not the engine: the row's valueChanged handler
             # applies it to the engine, so both end up at 100 together. Calling
             # _on_contrast_changed directly updated the engine but left the
@@ -2327,6 +2402,9 @@ class SphereDocker(QDockWidget):
                 self._sync_settings_panel()
             finally:
                 self._syncing = False
+            # Harmonize light/shadow from the default base (same path as a
+            # canvas pick), then sync and persist the coherent trio.
+            self._distribute_from(QColor(self._targets["base"]))
             self._sync_target_buttons()
             self._sync_sliders_from_state()
             # Rebuilds and persists, since a reset is a change that must stick.
@@ -2757,18 +2835,6 @@ class SphereDocker(QDockWidget):
     # ------------------------------------------------------------------
     # Krita integration
     # ------------------------------------------------------------------
-    @pyqtSlot()
-    def isCanvasObserver(self) -> bool:
-        """Declare this dock observes the active canvas so Krita pushes updates to us.
-
-        Decorated as a slot because Krita asks for this through the Qt
-        meta-object, not by calling the Python method directly. An undecorated
-        Python method is invisible to that lookup, so Krita saw the default
-        (false) and logged "is not a canvas observer" on every startup even
-        though this returned True.
-        """
-
-        return True
     def canvasChanged(self, canvas):
         """Called by Krita when the active canvas/document changes.
 

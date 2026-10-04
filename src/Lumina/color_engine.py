@@ -70,6 +70,8 @@ class ColorEngine:
 
     RIM_POWER = 5.0
     RIM_LIGHT = 0.14
+    # Immutable rim default. Live state is self.rim_light (property).
+    RIM_LIGHT_DEFAULT = 0.14
     RIM_TOP_WEIGHT = 0.35
     RIM_BOTTOM_GAIN = 1.0
     RIM_SHADOW_LIFT = 0.0
@@ -87,13 +89,17 @@ class ColorEngine:
 
         # User-facing controls.
         self.ambient = 0.10
-        self.light_azimuth = 295.0
-        self.light_elevation = 70.0
-        self.shininess = 8.0
+        # Azimuth convention: 0 = right, 90 = bottom, 270 = top.
+        # 274 mirrors the requested 86 across the horizontal: same dial
+        # position, but the key light comes from above as painters expect.
+        self.light_azimuth = 287.0
+        self.light_elevation = 45.0
+        self.shininess = 3.52
         self.spec_knee = 0.22
         # Live specular ceiling. SPEC_MAX/SPEC_MAX_DEFAULT is the immutable
         # renderer default; spec_max property is the single source of truth.
         self._spec_max = float(self.SPEC_MAX_DEFAULT)
+        self._rim_light = float(self.RIM_LIGHT_DEFAULT)
 
         self.ambient_color: Color = (0.88, 0.88, 0.88)
         self.shadow_color: Color = (0.1569, 0.1569, 0.2353)
@@ -101,7 +107,7 @@ class ColorEngine:
         self.light_color: Color = (1.0, 1.0, 1.0)
 
         self.light_intensity = 1.0
-        self.light_type = "Point"
+        self.light_type = "Sun"
 
         self.grain = 0.0
         self.smooth = 2.0
@@ -285,6 +291,18 @@ class ColorEngine:
     def set_spec_max(self, value) -> None:
         # Per-preset specular ceiling. Baseline 0.24; Matte ~0.10, Neon ~0.28.
         self.spec_max = value
+
+    @property
+    def rim_light(self) -> float:
+        return float(getattr(self, "_rim_light", self.RIM_LIGHT_DEFAULT))
+
+    @rim_light.setter
+    def rim_light(self, value) -> None:
+        self._rim_light = max(0.0, min(1.0, float(value)))
+        self._compute_shading()
+
+    def set_rim_light(self, value) -> None:
+        self.rim_light = value
 
     def set_spec_knee(self, value) -> None:
         self.spec_knee = max(self.SPEC_KNEE_MIN, min(self.SPEC_KNEE_MAX, float(value)))
@@ -562,38 +580,64 @@ class ColorEngine:
     # ------------------------------------------------------------------
     # Final display transforms
     # ------------------------------------------------------------------
-    def _apply_display_controls(self, color: Color) -> Color:
+    @staticmethod
+    def _contrast_luma(luma: float, contrast: float) -> float:
+        # Endpoint-preserving S-curve around the midtone: black stays black,
+        # white stays white, and no nonzero luma is ever forced to zero.
+        # The old 0.5-centered linear rescale hard-crushed everything below
+        # 0.5-0.5/contrast to exact black, erasing shadows and the rim.
+        luma = max(0.0, min(1.0, float(luma)))
+        contrast = max(0.5, min(2.0, float(contrast)))
+
+        if luma <= 0.0:
+            return 0.0
+        if luma >= 1.0:
+            return 1.0
+
+        centered = 2.0 * luma - 1.0
+        shaped = math.copysign(abs(centered) ** contrast, centered)
+        return 0.5 + 0.5 * shaped
+
+    def _apply_contrast(self, color: Color) -> Color:
         # Contrast acts on luminance while preserving the color direction.
         luma = 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]
-        contrasted_luma = 0.5 + (luma - 0.5) * self.contrast
+        contrasted_luma = self._contrast_luma(luma, self.contrast)
         if luma > 1.0e-8:
-            scale = max(0.0, contrasted_luma) / luma
-            color = self._mul(color, scale)
-        else:
-            color = (0.0, 0.0, 0.0)
+            scale = contrasted_luma / luma
+            return self._mul(color, scale)
+        return (0.0, 0.0, 0.0)
 
-        # Global tone control is implemented as saturation, as the docker labels
-        # this row "Tone" and calls set_saturation().
+    def _apply_saturation(self, color: Color) -> Color:
+        # Global tone control is saturation, as the docker labels this row
+        # "Tone" and calls set_saturation().
         luma = 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]
-        color = (
+        return (
             luma + (color[0] - luma) * self.saturation,
             luma + (color[1] - luma) * self.saturation,
             luma + (color[2] - luma) * self.saturation,
         )
 
-        color = self._mul(color, self.brightness)
+    def _apply_brightness(self, color: Color) -> Color:
+        return self._mul(color, self.brightness)
 
-        if self.mixer_mode == "Additive":
-            color = self._add(color, (0.045, 0.045, 0.045))
-        elif self.mixer_mode == "Multiplicative":
-            color = self._mul(color, 0.93)
+    def _compute_rim(self, nv: float, ndl: float, illuminance: float,
+                     light_linear: Color) -> Color:
+        rim = (1.0 - nv) ** self.RIM_POWER
+        rim *= ndl
+        rim *= self.rim_light
+        rim *= (0.5 + 0.5 * min(2.0, illuminance))
+        return self._mul(light_linear, rim)
 
-        # Simple deterministic grain. Random noise is intentionally avoided so
-        # redraws of the same settings remain stable while the user drags.
-        if self.grain > 0.0:
-            pass
-
-        return color
+    def _compute_glow(self, nv: float, ndl: float,
+                      highlight_linear: Color) -> Color:
+        # Engine stores glow as a fraction (docker sends percent / 100);
+        # an extra /100 here once made it ~100x too weak.
+        if self.glow_intensity <= 0.0:
+            return (0.0, 0.0, 0.0)
+        glow_power = max(1.0, self.glow_radius / 4.0)
+        glow = ((1.0 - nv) ** glow_power) * ndl
+        glow *= self.glow_intensity
+        return self._mul(highlight_linear, glow * 0.18)
 
     @staticmethod
     def _tone_map(color: Color) -> Color:
@@ -716,31 +760,44 @@ class ColorEngine:
                 spec_term = self._clamp(spec_term, 0.0, 4.0)
                 body = self._add(body, self._mul(highlight_linear, spec_term))
 
-                # Fresnel-style rim, restricted to the illuminated side so it
-                # does not create a second light source in the shadow.
-                rim = (1.0 - nv) ** self.RIM_POWER
-                rim *= ndl
-                rim *= self.RIM_LIGHT
-                rim *= (0.5 + 0.5 * min(2.0, illuminance))
-                body = self._add(body, self._mul(light_linear, rim))
-
-                # Optional glow is another view-angle falloff, intentionally
-                # separate from physical specular so the Neon preset remains an
-                # artistic mode without corrupting the core light equation.
-                if self.glow_intensity > 0.0:
-                    glow_power = max(1.0, self.glow_radius / 4.0)
-                    glow = ((1.0 - nv) ** glow_power) * ndl
-                    glow *= self.glow_intensity / 100.0
-                    body = self._add(body, self._mul(highlight_linear, glow * 0.18))
-
-                # Keep the three mixer modes as artist-level post responses.
+                # Mixer modes modify the lit sphere response once, using the
+                # local illumination term so the effect follows the light
+                # rather than acting as a second global display transform.
                 if self.mixer_mode == "Additive":
                     body = self._add(body, self._mul((1.0, 1.0, 1.0), ndl * 0.06))
                 elif self.mixer_mode == "Multiplicative":
                     body = self._mul(body, 0.78 + 0.22 * ndl)
 
+                # Body grading: contrast, then saturation/brightness. Accents
+                # stay above all three so Tone can't recolor them.
+                body = self._apply_contrast(body)
+                body = self._apply_saturation(body)
+                body = self._apply_brightness(body)
+
+                # Grain on the graded body at controlled strength: contrast no
+                # longer stretches it. The shadow boost is preserved; it is an
+                # intentional artistic choice, just not amplified twice.
                 body = self._apply_grain(body, row, col, shadow_factor)
-                body = self._apply_display_controls(body)
+
+                # Fresnel-style rim as an accent layer above grading: it lives
+                # in low-luma pixels, so contrasting first would crush it.
+                # Restricted to the illuminated side so it does not create a
+                # second light source in the shadow.
+                body = self._add(
+                    body,
+                    self._compute_rim(nv, ndl, illuminance, light_linear),
+                )
+
+                # Glow sits alongside rim: an artistic bloom/accent above
+                # grading (so neither contrast nor Tone can suppress or
+                # recolor it) but below tone mapping (so Reinhard still
+                # compresses the combined body/rim/glow energy instead of
+                # letting glow bypass it).
+                body = self._add(
+                    body,
+                    self._compute_glow(nv, ndl, highlight_linear),
+                )
+
                 body = self._tone_map(body)
                 out_row.append(body)
 

@@ -86,12 +86,22 @@ The selected target shows on its **color swatch** beside the icon, which grows s
 
 ### Sliders
 
+Every slider shows its value at the right end.
+
+#### Typing values
+
+Click a value and type to set it directly. A trailing `%` means
+percent-of-range (`86%` on a 0–200 row sets 172); otherwise the number is the
+raw slider value. Hue shows degrees and Specular its 1–64 range, without a
+`%` sign. Anything outside the range is clamped, and non-numeric input is
+ignored (the readout snaps back).
+
 | Slider | Range | What it does |
 |---|---|---|
 | **Hue** | 0–359 | Changes the hue of the **selected target**. Fixed rainbow track. |
 | **Saturation** | 0–100 | Changes the saturation of the selected target. The track re-renders as grey → full color at the current hue. |
 | **Light** | 0–100 | Brightness of the **base** target only; hidden for shadow and light, which are derived from the base. |
-| **Contrast** | 0–200, default 100 (middle) | Controls how sharply the light falls off into shadow on the orb. 100 is neutral -- below or above that, tone mapping reshapes the falloff. It does **not** change a color. |
+| **Contrast** | 0–200, default 100 (middle) | Tonal separation around the midtone. Above 100 deepens it, below 100 softens it; pure black and white are always preserved. It does **not** change a color. |
 | **Exposure** | 0–200, default 100 | Scene light level: scales Sun, Point, Spot and Area together. Mirrors the Advanced **Intensity** row. |
 
 ### Advanced (collapsed)
@@ -165,14 +175,21 @@ Sampler, the palette, or the Color Selector docker.
 
 | Setting | What it does |
 |---|---|
-| **Light azimuth** | Rotates the main light around the sphere, 0–359°. |
-| **Light height** | Raises and lowers the light, 0–90°. |
-| **Highlight size** | Highlight size on the orb, 0–100. Up means a bigger, softer highlight. Drives the same sharpness as the Advanced **Specular** row, so the two stay in sync. |
+| **Light azimuth** | Rotates the main light around the sphere, 0–359° (default 287°). |
+| **Light height** | Raises and lowers the light, 0–90° (default 45°). |
+| **Highlight size** | Highlight size on the orb, 0–100 (default 80). Up means a bigger, softer highlight. Drives the same sharpness as the Advanced **Specular** row, so the two stay in sync. |
 | **Quality** | Render grid size. *Low* is smoothest while dragging, *High* is finest. |
 | **Show color cursor** | Show or hide the ring that follows the pointer over the orb. It marks the exact pixel being read and previews that color; it does not magnify. |
 | **Use base color as brush** | Sends the **base color** to Krita's foreground. Use it after editing with the sliders, since slider edits do not touch the brush. |
 | **Reset all** | Restores every color and lighting value to its default, and saves that reset. |
 | **Save settings** | Writes your current setup to disk. Changes already save as you make them, so this is a checkpoint — it confirms the write rather than being the only chance to keep your work. |
+
+### Defaults
+
+On first launch (and on *Reset all*) the lamp is **Sun**, and the shadow and
+light targets are harmonized from the base color — slightly darker/cooler and
+lighter/warmer versions of it — instead of three fixed swatches. Saved settings
+always win over these defaults.
 
 ### Saved settings
 

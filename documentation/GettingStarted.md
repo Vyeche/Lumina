@@ -60,19 +60,23 @@ bottom:
 
 | Row | What it is |
 |---|---|
-| Two swatches | The **shadow** and **light** targets. |
+| Header | Gear (settings), the **original** and **active** color blocks, eyedropper. |
+| Lamp icons | **Point** / **Sun** / **Spot** / **Area** above the sphere. |
 | The orb | The shaded preview. Drag across it to sample a colour. |
-| Round glyphs | **Shadow**, **Light** and **Base** target selectors. |
+| Target dots + swatches | **Shadow**, **Base** and **Light** selectors; the active target's swatch grows with a white rim. |
 | Hue / Saturation / Light | Edits whichever target is active. |
-| Contrast | Light falloff across the sphere. |
+| Contrast / Exposure | Light falloff and scene light level. |
 | Presets | Six one-click looks, three per side of the orb. |
 | Advanced | The remaining lighting sliders and settings. |
+
+Every slider shows its value at the right end — click it to type a number
+(`86%` for percent-of-range, otherwise the raw value).
 
 The **Use base color as brush** button lives in the gear **Settings** popup:
 it sends the base colour to Krita's foreground. Slider edits never touch the
 brush on their own.
 
-![The panel as it opens, seeded from a sunset orange](../images/step1_panel.png)
+![The panel at its defaults](../images/step1_panel.png)
 
 ## 4. Pick your three colours
 

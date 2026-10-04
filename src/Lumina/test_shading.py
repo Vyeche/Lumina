@@ -43,6 +43,10 @@ SphereColorProcessor = color_processor.SphereColorProcessor
 
 def test_sphere_generates_image():
     proc = SphereColorProcessor(resolution=64)
+    # Pin the lighting: the center-brightness assertion below must not
+    # depend on shipped defaults.
+    proc.set_light_type("Point")
+    proc.set_light_angle(295.0, 70.0)
     img = proc.render_image(QColor(255, 0, 0), 64, 64)
     assert img.width() == 64
     assert img.height() == 64

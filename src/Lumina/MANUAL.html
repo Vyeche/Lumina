@@ -125,6 +125,13 @@ shows the exact color being sampled, and the RGB value appears underneath.</p>
 </table>
 <p>The selected target shows on its <strong>color swatch</strong> beside the icon, which grows slightly and takes a white rim. The icons themselves never change.</p>
 <h3>Sliders</h3>
+<p>Every slider shows its value at the right end.</p>
+<h4>Typing values</h4>
+<p>Click a value and type to set it directly. A trailing <code>%</code> means
+percent-of-range (<code>86%</code> on a 0–200 row sets 172); otherwise the number is the
+raw slider value. Hue shows degrees and Specular its 1–64 range, without a
+<code>%</code> sign. Anything outside the range is clamped, and non-numeric input is
+ignored (the readout snaps back).</p>
 <table>
 <thead>
 <tr>
@@ -152,7 +159,7 @@ shows the exact color being sampled, and the RGB value appears underneath.</p>
 <tr>
 <td><strong>Contrast</strong></td>
 <td>0–200, default 100 (middle)</td>
-<td>Controls how sharply the light falls off into shadow on the orb. 100 is neutral -- below or above that, tone mapping reshapes the falloff. It does <strong>not</strong> change a color.</td>
+<td>Tonal separation around the midtone. Above 100 deepens it, below 100 softens it; pure black and white are always preserved. It does <strong>not</strong> change a color.</td>
 </tr>
 <tr>
 <td><strong>Exposure</strong></td>
@@ -285,15 +292,15 @@ Sampler, the palette, or the Color Selector docker.</p>
 <tbody>
 <tr>
 <td><strong>Light azimuth</strong></td>
-<td>Rotates the main light around the sphere, 0–359°.</td>
+<td>Rotates the main light around the sphere, 0–359° (default 287°).</td>
 </tr>
 <tr>
 <td><strong>Light height</strong></td>
-<td>Raises and lowers the light, 0–90°.</td>
+<td>Raises and lowers the light, 0–90° (default 45°).</td>
 </tr>
 <tr>
 <td><strong>Highlight size</strong></td>
-<td>Highlight size on the orb, 0–100. Up means a bigger, softer highlight. Drives the same sharpness as the Advanced <strong>Specular</strong> row, so the two stay in sync.</td>
+<td>Highlight size on the orb, 0–100 (default 80). Up means a bigger, softer highlight. Drives the same sharpness as the Advanced <strong>Specular</strong> row, so the two stay in sync.</td>
 </tr>
 <tr>
 <td><strong>Quality</strong></td>
@@ -317,6 +324,11 @@ Sampler, the palette, or the Color Selector docker.</p>
 </tr>
 </tbody>
 </table>
+<h3>Defaults</h3>
+<p>On first launch (and on <em>Reset all</em>) the lamp is <strong>Sun</strong>, and the shadow and
+light targets are harmonized from the base color — slightly darker/cooler and
+lighter/warmer versions of it — instead of three fixed swatches. Saved settings
+always win over these defaults.</p>
 <h3>Saved settings</h3>
 <p>Your setup is written to a plain-text file and restored automatically the next
 time Krita opens: the three target colors, the lamp model, the light direction, highlight

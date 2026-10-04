@@ -115,6 +115,9 @@ class SphereColorProcessor:
     def set_spec_max(self, value) -> None:
         self.engine.set_spec_max(value)
 
+    def set_rim_light(self, value) -> None:
+        self.engine.set_rim_light(value)
+
     def set_contrast(self, value) -> None:
         self.engine.set_contrast(value)
 

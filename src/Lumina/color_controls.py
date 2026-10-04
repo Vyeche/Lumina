@@ -15,7 +15,7 @@ from PyQt5.QtCore import (Qt, QPoint, QPointF, QRectF, QSize, QTimer,
                          pyqtSignal)
 from PyQt5.QtGui import (QBrush, QColor, QLinearGradient, QPainter, QPen,
                          QPolygonF)
-from PyQt5.QtWidgets import (QCheckBox, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
+from PyQt5.QtWidgets import (QCheckBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSizePolicy,
                              QSlider, QVBoxLayout, QWidget)
 
 from .tooltip import set_tooltip
@@ -375,8 +375,8 @@ class SettingsPanel(QWidget):
 
     QUALITY = (("Low", 128), ("Med", 200), ("High", 288))
 
-    def __init__(self, azimuth: int = 295, elevation: int = 70,
-                 quality: int = 200, highlight_size: int = 100, parent=None):
+    def __init__(self, azimuth: int = 287, elevation: int = 45,
+                 quality: int = 200, highlight_size: int = 80, parent=None):
         super().__init__(parent, Qt.Popup)
         self.setStyleSheet(
             "QWidget { background-color: #343941; color: #e2e6ef; }"
@@ -502,22 +502,48 @@ class SettingsPanel(QWidget):
         sl.setRange(lo, hi)
         sl.setValue(value)
         rh.addWidget(sl, 1)
-        # Track-percentage readout: where the handle sits as % of the range.
-        # Uniform across sliders, so 50% always means the middle -- which is
-        # what the eye checks. Updates live on drag and on programmatic sync.
-        val = QLabel()
-        val.setFixedWidth(36)
+        # Percent readout: position as % of range. Type a value to set it:
+        # a trailing % means percent-of-range, else the raw slider number.
+        # Click to type: a trailing % means percent-of-range, else the raw
+        # slider value.
+        val = QLineEdit()
+        val.setFixedWidth(40)
         val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        val.setStyleSheet("color: #e2e6ef; font-size: 10px;")
+        val.setFrame(False)
+        val.setStyleSheet(
+            "QLineEdit { color: #e2e6ef; font-size: 10px; "
+            "background: #262b35; border-radius: 3px; padding-right: 2px; }"
+            "QLineEdit:hover { background: #2e3440; }"
+            "QLineEdit:focus { background: #333a48; color: #ffffff; }"
+        )
         rh.addWidget(val)
         sl.valueChanged.connect(
             lambda v, s=sl, w=val: w.setText(self._track_pct(s)))
         val.setText(self._track_pct(sl))
+        val.editingFinished.connect(
+            lambda s=sl, w=val: self._commit_typed(s, w))
         if not hasattr(self, "_readouts"):
             self._readouts = {}
         self._readouts[sl] = val
         root.addWidget(row)
         return sl
+
+    @staticmethod
+    def _commit_typed(sl, w) -> None:
+        """Commit a typed readout: '86%' is percent-of-range, else raw."""
+        try:
+            text = w.text().strip()
+            lo, hi = sl.minimum(), sl.maximum()
+            if text.endswith("%"):
+                frac = max(0.0, min(100.0, float(text[:-1]))) / 100.0
+                value = int(round(lo + frac * (hi - lo)))
+            else:
+                value = int(round(float(text)))
+            sl.setValue(max(lo, min(hi, value)))
+        except (TypeError, ValueError):
+            pass
+        finally:
+            w.setText(SettingsPanel._track_pct(sl))
 
     @staticmethod
     def _track_pct(sl) -> str:
