@@ -102,7 +102,7 @@ ignored (the readout snaps back).
 | **Saturation** | 0–100 | Changes the saturation of the selected target. The track re-renders as grey → full color at the current hue. |
 | **Light** | 0–100 | Brightness of the **base** target only; hidden for shadow and light, which are derived from the base. |
 | **Contrast** | 0–200, default 100 (middle) | Tonal separation around the midtone. Above 100 deepens it, below 100 softens it; pure black and white are always preserved. It does **not** change a color. |
-| **Exposure** | 0–200, default 100 | Scene light level: scales Sun, Point, Spot and Area together. Mirrors the Advanced **Intensity** row. |
+| **Intensity** (primary) | 0–200, default 100 | Scene light level: scales Sun, Point, Spot and Area together. Mirrors the Advanced **Intensity** row — one value, two handles. |
 
 ### Advanced (collapsed)
 
@@ -118,6 +118,10 @@ not fit, so nothing spills out over the dockers below it:
 | **Diffuse** | Softness of the highlight's falloff. High spreads it into a wide, gentle sheen; low keeps it a compact bright spot. Pairs with **Specular**: that sets how wide the highlight is, this sets how softly it fades. |
 | **Glow** | Bloom on the lit areas. |
 | **Tone** | Global saturation of the rendered result. |
+| **Rim** | 0–30%, default 14%. Edge accent strength — not a second key light. |
+| **Rim Tint** | 0–100%, default 60%. Blends the rim from the key color toward sky color. |
+| **Sky** | 0–10%, default 5%. Cool bounce from above in the shadows. |
+| **Ground** | 0–5%, default 2%. Warm bounce from below in the shadows. |
 | **Mixer** | How the light components blend: **Blended**, **Additive** or **Multiplicative**. |
 
 ### Presets

@@ -8,6 +8,7 @@ available.
 """
 
 from typing import Sequence
+import time
 
 try:
     from PyQt5.QtGui import QColor, QImage
@@ -60,6 +61,9 @@ class SphereColorProcessor:
         self.shadow_color = (0.1569, 0.1569, 0.2353)
         self.highlight_color = (1.0, 1.0, 1.0)
         self.light_color = (1.0, 1.0, 1.0)
+
+        # Last render_image() stage timings in ms (buffer pack + QImage).
+        self.last_ms = {"buffer": 0.0, "qimage": 0.0}
 
         self.engine = ColorEngine(resolution=self.resolution)
 
@@ -118,6 +122,15 @@ class SphereColorProcessor:
     def set_rim_light(self, value) -> None:
         self.engine.set_rim_light(value)
 
+    def set_rim_sky_mix(self, value) -> None:
+        self.engine.set_rim_sky_mix(value)
+
+    def set_sky_bounce(self, value) -> None:
+        self.engine.set_sky_bounce(value)
+
+    def set_ground_bounce(self, value) -> None:
+        self.engine.set_ground_bounce(value)
+
     def set_contrast(self, value) -> None:
         self.engine.set_contrast(value)
 
@@ -158,17 +171,24 @@ class SphereColorProcessor:
         h = self.resolution if height is None else max(2, int(height))
 
         pixels = self.engine.render(self._coerce_color(base_color), w, h)
+        t_buf = time.perf_counter()
         raw = self._build_buffer(pixels, w, h)
+        buf_ms = (time.perf_counter() - t_buf) * 1000.0
 
         if _HAS_QT:
-            return QImage(
+            t_img = time.perf_counter()
+            img = QImage(
                 bytes(raw),
                 w,
                 h,
                 w * 4,
                 QImage.Format_ARGB32,
             ).copy()
+            self.last_ms = {"buffer": buf_ms,
+                            "qimage": (time.perf_counter() - t_img) * 1000.0}
+            return img
 
+        self.last_ms = {"buffer": buf_ms, "qimage": 0.0}
         return raw
 
     def _build_buffer(self, pixels, w, h):

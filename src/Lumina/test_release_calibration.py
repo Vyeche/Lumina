@@ -154,11 +154,24 @@ def _accent_probe(engine):
     # Fixed surface/light sample in linear space for accent components.
     nv, ndl, illuminance = 0.35, 0.55, 1.1
     light = (0.9, 0.8, 0.7)
-    rim = engine._compute_rim(nv, ndl, illuminance, light)
+    sky = (0.2, 0.3, 0.5)
+    rim = engine._compute_rim(nv, ndl, illuminance, light, sky)
     engine.glow_intensity = 0.28
     glow = engine._compute_glow(nv, ndl, light)
     engine.glow_intensity = 0.0
     return rim, glow
+
+
+def test_rim_tint_blends_toward_sky():
+    # The rim must separate chromatically from a warm body: with a warm
+    # light and cool sky, the rim's blue share exceeds the light's own.
+    engine_mod = load_engine()
+    engine = engine_mod.ColorEngine(32)
+    rim = engine._compute_rim(0.35, 0.55, 1.1, (0.9, 0.8, 0.7), (0.2, 0.3, 0.5))
+    total = sum(rim)
+    assert total > 0.0, rim
+    assert rim[2] / total > 0.7 / (0.9 + 0.8 + 0.7), rim
+    print("  PASS rim sky tint")
 
 
 def test_tone_does_not_modify_rim_or_glow():
@@ -238,3 +251,100 @@ def test_format_slider_value():
     assert fmt(200, True) == "200%"
     assert fmt(180, False) == "180"
     assert fmt(8, False) == "8"
+
+
+def _quiet_sphere(engine_mod, res=96):
+    engine = engine_mod.ColorEngine(resolution=res)
+    engine.ambient = 0.0
+    engine.smooth = 0.0
+    engine.grain = 0.0
+    engine.glow_intensity = 0.0
+    engine.saturation = 1.0
+    engine.brightness = 1.0
+    engine.contrast = 1.0
+    engine.spec_max = 0.0
+    engine.set_shadow_color((1.0, 0.0, 0.0))
+    engine.set_light_color((0.0, 0.0, 1.0))
+    engine.set_highlight_color((1.0, 1.0, 1.0))
+    engine.set_light_type("Sun")
+    engine.set_light_angle(287.0, 45.0)
+    return engine
+
+
+def test_rim_toggle_moves_limb_pixels():
+    # A/B: identical renders except rim_light 0 vs 0.14. At the strongest
+    # theoretical rim pixel the 8-bit max-channel delta must clear 5.
+    engine_mod = load_engine()
+    res = 96
+    best = None
+    probe = engine_mod.ColorEngine(resolution=res)
+    probe.set_light_type("Sun")
+    probe.set_light_angle(287.0, 45.0)
+    for row in range(res):
+        for col in range(res):
+            if not probe._mask_grid[row][col]:
+                continue
+            x = -1.0 + 2.0 * col / (res - 1.0)
+            y = -1.0 + 2.0 * row / (res - 1.0)
+            nx, ny, nz = probe._normal_grid[row][col]
+            ldir, _ = probe._light_for_surface(
+                x, y, __import__("math").sqrt(max(0.0, 1.0 - x * x - y * y)))
+            ndl = max(0.0, nx * ldir[0] + ny * ldir[1] + nz * ldir[2])
+            score = ((1.0 - max(0.0, nz)) ** 5) * ndl
+            if best is None or score > best[0]:
+                best = (score, row, col)
+    assert best is not None and best[0] > 0.0
+    _, row, col = best
+
+    off = _quiet_sphere(engine_mod, res)
+    off.rim_light = 0.0
+    img_off = off.render((0.8, 0.4, 0.15), res, res)
+    on = _quiet_sphere(engine_mod, res)
+    on.rim_light = 0.14
+    img_on = on.render((0.8, 0.4, 0.15), res, res)
+
+    delta = max(abs(a - b) for a, b in zip(img_on[row][col], img_off[row][col]))
+    assert delta >= 5, ((row, col), img_off[row][col], img_on[row][col])
+    print(f"  PASS rim A/B delta={delta} at ({row},{col})")
+
+
+def test_hemisphere_bounce_lifts_shadow_form():
+    # In the unlit zone the sky-facing limb must read brighter than the
+    # ground-facing limb: directional bounce, not a flat floor.
+    engine_mod = load_engine()
+    res = 96
+    engine = _quiet_sphere(engine_mod, res)
+    pixels = engine.render((0.5, 0.5, 0.5), res, res)
+    upper, lower = [], []
+    for row in range(res):
+        for col in range(res):
+            if not engine._mask_grid[row][col]:
+                continue
+            x = -1.0 + 2.0 * col / (res - 1.0)
+            y = -1.0 + 2.0 * row / (res - 1.0)
+            nx, ny, nz = engine._normal_grid[row][col]
+            ldir, _ = engine._light_for_surface(x, y, 0.0)
+            ndl = max(0.0, nx * ldir[0] + ny * ldir[1] + nz * ldir[2])
+            if ndl < 0.05:
+                (upper if ny < 0.0 else lower).append(sum(pixels[row][col]) / 3.0)
+    assert upper and lower
+    mu = sum(upper) / len(upper)
+    ml = sum(lower) / len(lower)
+    assert mu > ml, (mu, ml)
+    print(f"  PASS hemisphere upper={mu:.1f} lower={ml:.1f}")
+
+
+def test_gear_highlight_size_domain():
+    # Gear owns shininess 64-8 (never the pathological wash at 1);
+    # Advanced Specular keeps the full 1-64 range.
+    import sys
+    sys.path.insert(0, "src")
+    from Lumina.sphere_docker import SphereDocker
+    to_shin = SphereDocker._size_to_shininess
+    to_size = SphereDocker._shininess_to_size
+    assert to_shin(0) == 64.0
+    assert to_shin(100) == 8.0
+    assert abs(to_shin(50) - 50.0) < 1.0
+    for level in (0, 25, 50, 75, 100):
+        assert to_size(to_shin(level)) == level, level
+    print("  PASS gear 64-8 domain")

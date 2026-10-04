@@ -24,6 +24,7 @@ Key V2 design decisions implemented here:
 """
 
 import math
+import time
 import weakref
 from typing import Callable, Optional
 
@@ -90,17 +91,18 @@ SHININESS_REF = 3.52
 SHININESS_MAX = 64.0
 ORB_SIZE = 200          # diameter of the circular orb
 ORB_RENDER = 200        # engine render resolution (square)
-# Ceiling on the render resolution while a slider is held down. The shading loop
-# is pure Python and costs ~0.9 us per pixel, so the full 288px "High" preset
-# blocks the UI thread for ~76 ms per update -- long enough that the slider
-# handle visibly lags the cursor. 128px costs ~15.6 ms (~64 Hz), which tracks the
-# pointer smoothly, and the full-resolution orb is drawn again on release.
-DRAG_RENDER = 128
+# Ceiling on the render resolution while a slider is held down. Renders are
+# throttled to ~30 ms during drags and the blur pass is suspended, so 96 px
+# previews track the pointer; the full-resolution orb is drawn again on
+# release.
+DRAG_RENDER = 96
+DRAG_THROTTLE_MS = 30.0
 # Settings schema version. v1 stored Tone as brightness (bug); v2 stores Tone
 # as saturation. v3 persists spec_max. v4 migrates Diffuse/highlight-size
 # slider levels to the perceptual curves (old linear positions reinterpreted
 # as old physical values, then mapped to equivalent new positions).
-SETTINGS_VERSION = 4
+# v5 persists the environment accents (rim, rim tint, sky, ground).
+SETTINGS_VERSION = 5
 # --- Persisted settings -----------------------------------------------------
 # Stored via QSettings so they land somewhere the user can find and back up. The
 # Inifile format is deliberate: it is a plain text file inside the flatpak's
@@ -173,37 +175,43 @@ _PRESETS = (
      "tip": "Artistic: bright white highlights, high contrast",
      "values": {"highlight": (1.0, 0.86, 0.72), "ambient": 12, "intensity": 100,
                 "contrast": 112, "specular": 8, "diffuse": 72, "glow": 0,
-                "tone": 100, "mixer": "Blended", "spec_max": 24}},
+                "tone": 100, "mixer": "Blended", "spec_max": 24,
+                 "rim": 14, "rim_mix": 60, "sky": 5, "ground": 2}},
     {"key": "real", "label": "Real", "glyph": "layers",
      "accent": Accent.PURPLE,
      "tip": "Real-world: warm highlights, soft natural contrast",
      "values": {"highlight": (1.0, 1.0, 1.0), "ambient": 10, "intensity": 100,
                 "contrast": 92, "specular": 12, "diffuse": 72, "glow": 0,
-                "tone": 100, "mixer": "Blended", "spec_max": 20}},
+                "tone": 100, "mixer": "Blended", "spec_max": 20,
+                 "rim": 12, "rim_mix": 50, "sky": 6, "ground": 3}},
     {"key": "nocturne", "label": "Nocturne", "glyph": "moon",
      "accent": Accent.BLUE,
      "tip": "Nocturne: low key, cool moonlight, deep shadow",
      "values": {"highlight": (0.65, 0.75, 1.0), "ambient": 4, "intensity": 92,
                 "contrast": 118, "specular": 8, "diffuse": 45, "glow": 0,
-                "tone": 88, "mixer": "Blended", "spec_max": 18}},
+                "tone": 88, "mixer": "Blended", "spec_max": 18,
+                 "rim": 18, "rim_mix": 80, "sky": 3, "ground": 1}},
     {"key": "gloss", "label": "Gloss", "glyph": "gloss",
      "accent": Accent.CYAN,
      "tip": "Gloss: tight bright highlight, slick and punchy",
      "values": {"highlight": (1.0, 1.0, 1.0), "ambient": 8, "intensity": 100,
                 "contrast": 110, "specular": 28, "diffuse": 30, "glow": 12,
-                "tone": 105, "mixer": "Blended", "spec_max": 24}},
+                "tone": 105, "mixer": "Blended", "spec_max": 24,
+                 "rim": 16, "rim_mix": 40, "sky": 4, "ground": 2}},
     {"key": "matte", "label": "Matte", "glyph": "disc",
      "accent": Accent.NEUTRAL,
      "tip": "Matte: even clay-like falloff, no specular hotspot",
      "values": {"highlight": (0.94, 0.94, 0.92), "ambient": 12, "intensity": 100,
                 "contrast": 85, "specular": 5, "diffuse": 100, "glow": 0,
-                "tone": 96, "mixer": "Blended", "spec_max": 10}},
+                "tone": 96, "mixer": "Blended", "spec_max": 10,
+                 "rim": 6, "rim_mix": 50, "sky": 8, "ground": 4}},
     {"key": "neon", "label": "Neon", "glyph": "bolt",
      "accent": Accent.GREEN,
      "tip": "Neon: saturated and blooming, coloured light",
      "values": {"highlight": (0.80, 1.0, 1.0), "ambient": 3, "intensity": 100,
                 "contrast": 114, "specular": 12, "diffuse": 55, "glow": 28,
-                "tone": 118, "mixer": "Additive", "spec_max": 28}},
+                "tone": 118, "mixer": "Additive", "spec_max": 28,
+                 "rim": 20, "rim_mix": 70, "sky": 2, "ground": 1}},
 )
 
 HEADER_BTN = 38         # gear / eyedropper size in the header row
@@ -1021,18 +1029,20 @@ class SphereDocker(DockWidget):
         self.contrast_row = LabeledSliderRow(Accent.NEUTRAL, "Contrast",
                                              int(round(_eng.contrast * 100)),
                                              hi=200)
-        # Exposure is the scene light level (all lamp energy scales with it),
-        # front and centre instead of buried in Advanced. It owns the same
-        # engine value as the Intensity row; the two mirror each other, so a
-        # preset, reset or load updates both and either handle drives both.
-        self.power_row = LabeledSliderRow(Accent.AMBER, "Exposure",
+        # Primary Intensity: the scene light level (all lamp energy scales
+        # with it), front and centre instead of buried in Advanced. It owns
+        # the same engine value as the Advanced Intensity row; the two mirror
+        # each other, so a preset, reset or load updates both and either
+        # handle drives both. Both are called Intensity -- there is only one
+        # light_intensity, not a separate photographic exposure stage.
+        self.power_row = LabeledSliderRow(Accent.AMBER, "Intensity",
                                           int(round(_eng.light_intensity * 100)),
                                           hi=200)
         _set_tooltip(self.hue_row, "Hue of the active target color")
         _set_tooltip(self.saturation_row, "Saturation of the active target color")
         _set_tooltip(self.light_row, "Brightness of the base target color")
         _set_tooltip(self.contrast_row, "Sharpness of the light-to-shadow falloff (100 is neutral)")
-        _set_tooltip(self.power_row, "Scene light level: scales Sun, Point, Spot and Area together")
+        _set_tooltip(self.power_row, "Scene light level: scales Sun, Point, Spot and Area together (mirrors Advanced Intensity)")
         LOG.info("4 primary slider rows created")
 
         # --- Advanced rows (collapsed by default) ---
@@ -1055,8 +1065,19 @@ class SphereDocker(DockWidget):
         self.tone_row = LabeledSliderRow(Accent.GREEN, "Tone",
                                          int(round(_eng.saturation * 100)),
                                          hi=200)
+        # Environment accents (rim strength/sky mix, sky/ground bounce).
+        # Kept in Advanced, not the main panel: they shape the lighting
+        # model rather than the color being picked.
+        self.rim_row = LabeledSliderRow(Accent.PURPLE, "Rim", 14)
+        self.rim_mix_row = LabeledSliderRow(Accent.PURPLE, "Rim Tint", 60)
+        self.sky_row = LabeledSliderRow(Accent.BLUE, "Sky", 5)
+        self.ground_row = LabeledSliderRow(Accent.AMBER, "Ground", 2)
+        _set_tooltip(self.rim_row, "Rim edge strength (accent, not a second key light)")
+        _set_tooltip(self.rim_mix_row, "Rim tint: key color to sky color")
+        _set_tooltip(self.sky_row, "Sky bounce from above in the shadows")
+        _set_tooltip(self.ground_row, "Ground bounce from below in the shadows")
         _set_tooltip(self.color_row, "Overall brightness of the base color, preserves hue and saturation")
-        _set_tooltip(self.intensity_row, "Scene light level (mirrors Exposure)")
+        _set_tooltip(self.intensity_row, "Scene light level (mirrors the primary Intensity row)")
         _set_tooltip(self.ambient_row, "Fill light softening the shadowed areas")
         _set_tooltip(self.specular_row, "Highlight width: low is broad, high is tight")
         _set_tooltip(self.diffuse_row, "Highlight falloff softness: high spreads the sheen")
@@ -1795,6 +1816,7 @@ class SphereDocker(DockWidget):
                                            accent=Accent.NEUTRAL)
         for row in (self.color_row, self.intensity_row, self.ambient_row,
                     self.specular_row, self.diffuse_row, self.glow_row, self.tone_row,
+                    self.rim_row, self.rim_mix_row, self.sky_row, self.ground_row,
                     self.mixer_row):
             self.advanced.add_row(row)
         layout.addWidget(self.advanced)
@@ -2016,6 +2038,21 @@ class SphereDocker(DockWidget):
             # it, or a highlight darker than its own base, which is exactly the
             # relationship the derivation exists to hold.
             self.light_row.setVisible(self._active_target == "base")
+            # Base Level scales the base multiplicatively, so at a near-black
+            # base there is nothing to scale (0 x factor = 0). Grey the row
+            # out below ~3% max-channel rather than presenting a dead
+            # control; the engine math is untouched. Gated on max RGB, not
+            # luma, so a dark saturated red still counts as real base
+            # information.
+            base = self._targets["base"]
+            has_base = max(base.redF(), base.greenF(), base.blueF()) >= 0.03
+            self.color_row.setEnabled(has_base)
+            if has_base:
+                _set_tooltip(self.color_row, "Overall brightness of the base color")
+            else:
+                _set_tooltip(self.color_row,
+                             "Base Level needs a non-black base: raise the base "
+                             "value to adjust it")
             # Name the target these rows are editing. Now that Light applies to
             # all three, "Light" alone is ambiguous: it could mean the base's
             # lightness or the highlight's.
@@ -2193,6 +2230,10 @@ class SphereDocker(DockWidget):
             "ambient": int(eng.ambient * 100.0),
             "specular": int(eng.shininess),
             "spec_max": int(round(float(getattr(eng, "spec_max", 0.24)) * 100.0)),
+            "rim": int(round(float(getattr(eng, "rim_light", 0.14)) * 100.0)),
+            "rim_mix": int(round(float(getattr(eng, "rim_sky_mix", 0.60)) * 100.0)),
+            "sky": int(round(float(getattr(eng, "sky_bounce", 0.05)) * 100.0)),
+            "ground": int(round(float(getattr(eng, "ground_bounce", 0.02)) * 100.0)),
             "glow": int(eng.glow_intensity * 100.0),
             "tone": int(eng.saturation * 100.0),
             "mixer": str(eng.mixer_mode),
@@ -2290,6 +2331,18 @@ class SphereDocker(DockWidget):
                     self.processor.set_spec_max(0.24)
                 else:
                     self.processor.set_spec_max(num("spec_max", 24, 0, 100) / 100.0)
+                # v5+ persists the environment accents; older settings keep
+                # the calibrated baselines.
+                if saved_version < 5:
+                    self.processor.set_rim_light(0.14)
+                    self.processor.set_rim_sky_mix(0.60)
+                    self.processor.set_sky_bounce(0.05)
+                    self.processor.set_ground_bounce(0.02)
+                else:
+                    self.processor.set_rim_light(num("rim", 14, 0, 30) / 100.0)
+                    self.processor.set_rim_sky_mix(num("rim_mix", 60, 0, 100) / 100.0)
+                    self.processor.set_sky_bounce(num("sky", 5, 0, 10) / 100.0)
+                    self.processor.set_ground_bounce(num("ground", 2, 0, 5) / 100.0)
                 self.processor.set_mixer_mode(str(s.value("mixer", "Blended")))
                 self.processor.set_light_type(str(s.value("light_type", "Sun")))
                 self.light_type_row.set_mode(str(s.value("light_type", "Sun")))
@@ -2307,6 +2360,10 @@ class SphereDocker(DockWidget):
                 self.specular_row.set_value(int(eng.shininess))
                 self.glow_row.set_value(int(eng.glow_intensity * 100.0))
                 self.tone_row.set_value(int(eng.saturation * 100.0))
+                self.rim_row.set_value(int(round(eng.rim_light * 100.0)))
+                self.rim_mix_row.set_value(int(round(eng.rim_sky_mix * 100.0)))
+                self.sky_row.set_value(int(round(eng.sky_bounce * 100.0)))
+                self.ground_row.set_value(int(round(eng.ground_bounce * 100.0)))
                 self._sync_settings_panel()
                 self._sync_target_buttons()
                 self._sync_sliders_from_state()
@@ -2376,6 +2433,10 @@ class SphereDocker(DockWidget):
                 eng.set_spec_knee(SPEC_KNEE)
                 eng.set_spec_max(0.24)
                 eng.set_glow_intensity(0.0)
+                eng.set_rim_light(0.14)
+                eng.set_rim_sky_mix(0.60)
+                eng.set_sky_bounce(0.05)
+                eng.set_ground_bounce(0.02)
                 eng.set_brightness(1.0)
                 eng.set_saturation(1.0)
                 self._orb_render_size = ORB_RENDER
@@ -2399,6 +2460,10 @@ class SphereDocker(DockWidget):
                 self.diffuse_row.set_value(self._knee_to_level(SPEC_KNEE))
                 self.glow_row.set_value(0)
                 self.tone_row.set_value(100)
+                self.rim_row.set_value(14)
+                self.rim_mix_row.set_value(60)
+                self.sky_row.set_value(5)
+                self.ground_row.set_value(2)
                 self._sync_settings_panel()
             finally:
                 self._syncing = False
@@ -2451,6 +2516,10 @@ class SphereDocker(DockWidget):
         self.light_row.slider.valueChanged.connect(self._on_light_changed)
         self.glow_row.slider.valueChanged.connect(self._on_glow_changed)
         self.tone_row.slider.valueChanged.connect(self._on_tone_changed)
+        self.rim_row.slider.valueChanged.connect(self._on_rim_changed)
+        self.rim_mix_row.slider.valueChanged.connect(self._on_rim_mix_changed)
+        self.sky_row.slider.valueChanged.connect(self._on_sky_changed)
+        self.ground_row.slider.valueChanged.connect(self._on_ground_changed)
 
         # Preset buttons connect themselves at construction time, from the
         # _PRESETS table. Connecting them again here used to be the only thing
@@ -2530,6 +2599,10 @@ class SphereDocker(DockWidget):
     def _on_slider_drag_begin(self) -> None:
         """Drop to the drag render size for the duration of the drag."""
         self._slider_dragging = True
+        # Suspend the blur pass while dragging: it costs more than the
+        # shading itself at these sizes and returns on release.
+        self._smooth_saved = self.processor.engine.smooth
+        self.processor.set_smooth(0.0)
 
     def _on_slider_drag_end(self) -> None:
         """Restore full render quality once the drag is over.
@@ -2543,6 +2616,7 @@ class SphereDocker(DockWidget):
         cancel an in-progress window drag.
         """
         self._slider_dragging = False
+        self.processor.set_smooth(getattr(self, "_smooth_saved", 2.0))
         self._rebuild_orb()
 
     def _rebuild_orb(self):
@@ -2575,7 +2649,21 @@ class SphereDocker(DockWidget):
             self._save_settings()
 
     def _rebuild_orb_now(self):
-        """Render and display the orb immediately (bypasses the coalescer)."""
+        """Render and display the orb immediately (bypasses the coalescer).
+
+        While dragging, renders are throttled to ~30ms so the handle tracks
+        the pointer; the release always schedules a full-quality final.
+        """
+        if getattr(self, "_slider_dragging", False):
+            now = time.monotonic()
+            last = getattr(self, "_last_orb_ms", 0.0)
+            gap_ms = (now - last) * 1000.0
+            if gap_ms < DRAG_THROTTLE_MS:
+                QTimer.singleShot(
+                    max(1, int(DRAG_THROTTLE_MS - gap_ms)),
+                    self._rebuild_orb_now)
+                return
+            self._last_orb_ms = now
         self._orb.set_image(self._render_orb())
 
     # ------------------------------------------------------------------
@@ -2722,21 +2810,22 @@ class SphereDocker(DockWidget):
 
     @staticmethod
     def _size_to_shininess(level: int) -> float:
-        """Map the gear's 0-100 highlight size onto engine shininess 1-64.
+        """Map the gear's 0-100 highlight size onto engine shininess 64-8.
 
-        Inverted and perceptual (t^2): size 100 is broadest (shininess 1),
-        size 0 is tightest (64). More control in the broad region where
-        painters adjust most. Authoritative domain is 1-64.
+        The gear is a quick convenience control, not the full expert range:
+        size 100 is softest (shininess 8), size 0 tightest (64). The
+        pathological giant wash at shininess 1 stays exclusive to Advanced
+        Specular. Perceptual (t^2) like before, remapped onto 64-8.
         """
         t = max(0.0, min(1.0, level / 100.0))
-        return 1.0 + (64.0 - 1.0) * ((1.0 - t) ** 2.0)
+        return 64.0 - 56.0 * (t ** 2.0)
 
     @staticmethod
     def _shininess_to_size(shininess: float) -> int:
         """Inverse of :meth:`_size_to_shininess`, for restoring a saved value."""
         import math
-        s = max(1.0, min(64.0, shininess))
-        t = 1.0 - math.sqrt((s - 1.0) / 63.0)
+        s = max(8.0, min(64.0, shininess))
+        t = math.sqrt((64.0 - s) / 56.0)
         return int(round(max(0.0, min(1.0, t)) * 100))
 
     def _on_glow_changed(self, value):
@@ -2746,6 +2835,34 @@ class SphereDocker(DockWidget):
             self._rebuild_orb()
         except Exception as exc:
             LOG.exception("_on_glow_changed failed")
+
+    def _on_rim_changed(self, value):
+        try:
+            self.processor.set_rim_light(value / 100.0)
+            self._rebuild_orb()
+        except Exception as exc:
+            LOG.exception("_on_rim_changed failed")
+
+    def _on_rim_mix_changed(self, value):
+        try:
+            self.processor.set_rim_sky_mix(value / 100.0)
+            self._rebuild_orb()
+        except Exception as exc:
+            LOG.exception("_on_rim_mix_changed failed")
+
+    def _on_sky_changed(self, value):
+        try:
+            self.processor.set_sky_bounce(value / 100.0)
+            self._rebuild_orb()
+        except Exception as exc:
+            LOG.exception("_on_sky_changed failed")
+
+    def _on_ground_changed(self, value):
+        try:
+            self.processor.set_ground_bounce(value / 100.0)
+            self._rebuild_orb()
+        except Exception as exc:
+            LOG.exception("_on_ground_changed failed")
 
     # NOTE: the old render-level _on_saturation_changed was removed. Saturation
     # is now a *target color* control (see _on_saturation_changed above); the
@@ -2804,6 +2921,13 @@ class SphereDocker(DockWidget):
             p.set_contrast(values["contrast"] / 100.0)
         if "spec_max" in values:
             p.set_spec_max(values["spec_max"] / 100.0)
+        for _name, _setter, _div in (
+                ("rim", p.set_rim_light, 100.0),
+                ("rim_mix", p.set_rim_sky_mix, 100.0),
+                ("sky", p.set_sky_bounce, 100.0),
+                ("ground", p.set_ground_bounce, 100.0)):
+            if _name in values:
+                _setter(values[_name] / _div)
         if "specular" in values:
             p.set_shininess(values["specular"])
             # The gear's highlight-size slider owns the same engine value.
@@ -2828,7 +2952,11 @@ class SphereDocker(DockWidget):
                           ("specular", self.specular_row),
                           ("diffuse", self.diffuse_row),
                           ("glow", self.glow_row),
-                          ("tone", self.tone_row)):
+                          ("tone", self.tone_row),
+                          ("rim", self.rim_row),
+                          ("rim_mix", self.rim_mix_row),
+                          ("sky", self.sky_row),
+                          ("ground", self.ground_row)):
             if name in values:
                 row.set_value(int(values[name]))
 

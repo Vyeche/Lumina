@@ -172,6 +172,9 @@ Contributions are genuinely welcome — bug reports, fixes, presets, translation
 and especially **real artists telling us what is awkward to use**, which is the
 feedback that has changed this plugin the most.
 
+Everyone taking part is expected to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md).
+
 A few things that will make a patch easy to merge:
 
 1. **Open an issue first** for anything larger than a fix, so we can agree on

@@ -65,7 +65,7 @@ bottom:
 | The orb | The shaded preview. Drag across it to sample a colour. |
 | Target dots + swatches | **Shadow**, **Base** and **Light** selectors; the active target's swatch grows with a white rim. |
 | Hue / Saturation / Light | Edits whichever target is active. |
-| Contrast / Exposure | Light falloff and scene light level. |
+| Contrast / Intensity | Light falloff and scene light level. |
 | Presets | Six one-click looks, three per side of the orb. |
 | Advanced | The remaining lighting sliders and settings. |
 
