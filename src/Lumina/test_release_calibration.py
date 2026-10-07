@@ -212,18 +212,13 @@ def test_grain_amplitude_is_contrast_independent():
 
 
 def _load_pure_helpers():
-    """Exec the real parse/format helpers without importing Qt."""
-    import ast
-    src = open("src/Lumina/sphere_docker.py").read()
-    tree = ast.parse(src)
-    wanted = {"parse_typed_slider_value", "format_slider_value"}
-    nodes = [n for n in tree.body
-             if isinstance(n, ast.FunctionDef) and n.name in wanted]
-    assert {n.name for n in nodes} == wanted, "helpers missing"
-    ns = {}
-    exec(compile(ast.Module(body=nodes, type_ignores=[]),
-                 "<slider-helpers>", "exec"), ns)
-    return ns["parse_typed_slider_value"], ns["format_slider_value"]
+    """Load the real typed_entry module without importing Qt."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "typed_entry", "src/Lumina/typed_entry.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.parse_typed_entry, mod.format_slider_value
 
 
 def test_engine_defaults():
@@ -236,13 +231,48 @@ def test_engine_defaults():
 
 def test_parse_typed_slider_value():
     parse, _ = _load_pure_helpers()
-    assert parse("86%", 0, 200) == 172
-    assert parse("90", 0, 200) == 90
-    assert parse("180", 0, 359) == 180
-    assert parse("9999", 0, 200) == 200
-    assert parse("-5", 0, 200) == 0
-    assert parse("junk", 0, 200) is None
-    assert parse("", 0, 200) is None
+    cases = [
+        # (text, lo, hi, value, valid, was_percent, was_clamped)
+        ("90", 0, 200, 90, True, False, False),
+        ("  90  ", 0, 200, 90, True, False, False),
+        ("90.0", 0, 200, 90, True, False, False),
+        ("86%", 0, 200, 172, True, True, False),
+        (" 90 % ", 0, 200, 180, True, True, False),
+        ("0%", 0, 200, 0, True, True, False),
+        ("100%", 0, 200, 200, True, True, False),
+        ("150%", 0, 200, 200, True, True, True),
+        ("-10%", 0, 200, 0, True, True, True),
+        ("90%", 0, 359, 323.1, True, True, False),
+        ("9999", 0, 200, 200, True, False, True),
+        ("-5", 0, 200, 0, True, False, True),
+        ("-0", 0, 200, 0, True, False, False),
+        ("-0%", 0, 200, 0, True, True, False),
+        ("1e3", 0, 200, 200, True, False, True),
+        ("1e2", 0, 200, 100, True, False, False),
+        ("", 0, 200, None, False, False, False),
+        ("   ", 0, 200, None, False, False, False),
+        ("junk", 0, 200, None, False, False, False),
+        ("%", 0, 200, None, False, True, False),
+        ("%%", 0, 200, None, False, True, False),
+        ("1%", 0, 200, 2, True, True, False),
+        ("nan", 0, 200, None, False, False, False),
+        ("+nan", 0, 200, None, False, False, False),
+        ("inf", 0, 200, None, False, False, False),
+        ("+inf", 0, 200, None, False, False, False),
+        ("-inf", 0, 200, None, False, False, False),
+    ]
+    for text, lo, hi, value, valid, was_percent, was_clamped in cases:
+        r = parse(text, lo, hi)
+        assert (r.value, r.valid, r.was_percent, r.was_clamped) == \
+            (value, valid, was_percent, was_clamped), text
+    # Degree-unit forms (azimuth/hue fields).
+    assert parse("86°", 0, 359, "degree").value == 86
+    assert parse("86deg", 0, 359, "degree").value == 86
+    assert parse("86", 0, 359, "degree").value == 86
+    assert parse("86%", 0, 359, "degree").value == 308.74
+    assert parse("64°", 0, 100, "none").valid is False
+    assert parse("64%", 0, 100, "none").value == 64
+    print("  PASS typed-entry parse table")
 
 
 def test_format_slider_value():
@@ -251,6 +281,9 @@ def test_format_slider_value():
     assert fmt(200, True) == "200%"
     assert fmt(180, False) == "180"
     assert fmt(8, False) == "8"
+    assert fmt(180, "degree") == "180°"
+    assert fmt(86, "percent") == "86%"
+    assert fmt(64, "none") == "64"
 
 
 def _quiet_sphere(engine_mod, res=96):
@@ -348,3 +381,53 @@ def test_gear_highlight_size_domain():
     for level in (0, 25, 50, 75, 100):
         assert to_size(to_shin(level)) == level, level
     print("  PASS gear 64-8 domain")
+
+
+def test_clear_timing_drops_stale_mode_samples():
+    """Rolling timing averages must not leak across render-profile switches.
+
+    Regression for the ghosts that sent an investigation after a 22 ms
+    geometry average and a 45 ms smooth average during 96 px previews:
+    both stages record samples in only one mode, so entering/exiting the
+    external-drag preview clears them.
+    """
+    mod = load_engine()
+    engine_cls = getattr(mod, "LightingEngine", None) or getattr(mod, "ColorEngine")
+    engine = engine_cls()
+    engine._record_timing("smooth", 45.0)
+    engine._record_timing("geometry", 22.0)
+    engine._record_timing("material", 12.0)
+    engine.clear_timing("smooth", "geometry")
+    assert "smooth" not in engine._timings
+    assert "geometry" not in engine._timings
+    assert engine._timings["material"] == [12.0]
+    # Clearing a name with no samples is a no-op, not a KeyError.
+    engine.clear_timing("smooth", "missing-stage")
+
+
+def test_geometry_cache_survives_size_switch():
+    """Switching 200 -> 96 -> 200 must reuse grids, not regenerate them.
+
+    Run-2: the first preview after every full-quality final paid ~40 ms of
+    geometry + shading rebuild. Restored pixels must be identical to a
+    fresh render, and the caches must stay bounded.
+    """
+    mod = load_engine()
+    engine_cls = getattr(mod, "LightingEngine", None) or getattr(mod, "ColorEngine")
+    base = (0.8, 0.4, 0.2)
+    fresh = engine_cls()
+    ref200 = fresh.render(base, 200, 200)
+    switched = engine_cls()
+    switched.render(base, 200, 200)
+    switched.render(base, 96, 96)
+    again200 = switched.render(base, 200, 200)
+    assert again200 == ref200
+    # The init-time default size (256) is also cached; what matters is our
+    # two sizes are warm and the caches stay bounded.
+    assert {(200, 200), (96, 96)} <= set(switched._geo_cache)
+    assert len(switched._geo_cache) <= 6
+    assert len(switched._shading_cache) <= 12
+    # Same size twice in a row is a pure cache hit: grids identical objects.
+    before = switched._normal_grid
+    switched.render(base, 200, 200)
+    assert switched._normal_grid is before

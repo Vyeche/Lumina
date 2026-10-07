@@ -127,11 +127,13 @@ shows the exact color being sampled, and the RGB value appears underneath.</p>
 <h3>Sliders</h3>
 <p>Every slider shows its value at the right end.</p>
 <h4>Typing values</h4>
-<p>Click a value and type to set it directly. A trailing <code>%</code> means
-percent-of-range (<code>86%</code> on a 0–200 row sets 172); otherwise the number is the
-raw slider value. Hue shows degrees and Specular its 1–64 range, without a
-<code>%</code> sign. Anything outside the range is clamped, and non-numeric input is
-ignored (the readout snaps back).</p>
+<p>Click a value and type to set it directly. Display is always
+canonical-with-unit: percent rows show <code>86%</code>, angle rows <code>323°</code>, unitless
+rows <code>64</code>. Typing stays permissive: <code>86</code> and <code>86%</code> both work on percent
+rows, <code>86</code>/<code>86°</code>/<code>86deg</code> on angle rows; anything outside the range is
+clamped with a brief amber flash, and non-numeric input is ignored (the
+readout snaps back). Press Enter to commit; clicking away reverts
+half-typed text.</p>
 <table>
 <thead>
 <tr>

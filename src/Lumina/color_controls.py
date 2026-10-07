@@ -19,6 +19,64 @@ from PyQt5.QtWidgets import (QCheckBox, QHBoxLayout, QLabel, QLineEdit, QPushBut
                              QSlider, QVBoxLayout, QWidget)
 
 from .tooltip import set_tooltip
+from .typed_entry import format_slider_value as format_value
+
+
+TYPED_READOUT_STYLE = (
+    "QLineEdit { color: #e2e6ef; font-size: 10px; "
+    "background: #262b35; border-radius: 3px; padding-right: 2px; }"
+    "QLineEdit:hover { background: #2e3440; }"
+    "QLineEdit:focus { background: #333a48; color: #ffffff; }"
+)
+
+
+def _flash_clamped(widget) -> None:
+    """Brief amber outline marking a clamped commit. Purely visual."""
+    try:
+        original = widget.styleSheet()
+        widget.setStyleSheet(
+            original + "QLineEdit { border: 1px solid #c98a2e; }")
+        QTimer.singleShot(
+            300,
+            lambda: widget.setStyleSheet(original),
+        )
+    except Exception:  # pragma: no cover - cosmetic only
+        pass
+
+
+class TypedReadout(QLineEdit):
+    """Editable numeric readout: Enter commits, blur reverts half-typed text.
+
+    Tracks dirtiness itself so owners never double-commit: ``returnPressed``
+    commits, and ``focusOutEvent`` restores the last committed text only when
+    an edit is still dirty. The owner supplies commit/revert by connecting
+    ``returnPressed`` and calling :meth:`mark_committed`.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._typed_dirty = False
+        self._canonical_text = ""
+        self.setFixedWidth(40)
+        self.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.setFrame(False)
+        self.setStyleSheet(TYPED_READOUT_STYLE)
+        self.textEdited.connect(self._mark_typed_dirty)
+
+    def _mark_typed_dirty(self, _text: str) -> None:
+        self._typed_dirty = True
+
+    def mark_committed(self, canonical_text: str) -> None:
+        """Record committed text; clears the dirty flag."""
+        self._typed_dirty = False
+        self._canonical_text = canonical_text
+        self.setText(canonical_text)
+
+    def focusOutEvent(self, event) -> None:
+        if self._typed_dirty:
+            self.setText(self._canonical_text)
+            self._typed_dirty = False
+        super().focusOutEvent(event)
 
 
 # ---------------------------------------------------------------------------
@@ -127,8 +185,8 @@ class ColorSlider(QSlider):
         self._dragging = False
         self._drag_from_x = 0.0
         self._drag_from_value = 0
-        self.setMinimumHeight(20)
-        self.setFixedHeight(20)
+        self.setMinimumHeight(26)
+        self.setFixedHeight(26)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setCursor(Qt.PointingHandCursor)
         self.valueChanged.connect(self.update)
@@ -152,8 +210,12 @@ class ColorSlider(QSlider):
             self._drag_from_value = self.value()
             event.accept()
             return
+        # Precision editor: a press outside the knob grabs keyboard focus so
+        # arrows still adjust, but never moves the value. Near-misses must
+        # not punish the user with a jump.
         self._dragging = False
-        super().mousePressEvent(event)
+        self.setFocus(Qt.MouseFocusReason)
+        event.accept()
 
     def mouseMoveEvent(self, event):
         if self._dragging and event.buttons() & Qt.LeftButton:
@@ -176,7 +238,9 @@ class ColorSlider(QSlider):
         self.update()
 
     def _handle_radius(self):
-        return min(max(5.0, self.height() / 2.0), self.height() / 2.0 + 2.0)
+        # Fixed 10 px visual knob inside the 26 px row: precise-looking,
+        # with generous vertical slop around it.
+        return 10.0
 
     def _handle_x(self):
         """Centre x of the handle, kept inside the widget.
@@ -199,7 +263,7 @@ class ColorSlider(QSlider):
         painter.setRenderHint(QPainter.Antialiasing, True)
         h = self.height()
         cy = h / 2.0
-        track_w = max(5.0, h / 2.0)
+        track_w = 10.0
         # The track spans the same inset range as the handle's travel, so the
         # fill always lines up with the handle and neither is clipped.
         r = self._handle_radius()
@@ -395,14 +459,17 @@ class SettingsPanel(QWidget):
         title.setStyleSheet("color: #e7eaf2; font-size: 11px; font-weight: bold;")
         root.addWidget(title)
 
-        self.azimuth = self._add_slider(root, "Light azimuth", 0, 359, azimuth)
-        self.elevation = self._add_slider(root, "Light height", 0, 90, elevation)
+        self.azimuth = self._add_slider(root, "Light azimuth", 0, 359,
+                                          azimuth, unit="degree")
+        self.elevation = self._add_slider(root, "Light height", 0, 90,
+                                          elevation, unit="degree")
         # Highlight size, 0-100, driving the same specular sharpness as the
         # Advanced "Specular" row but in the direction a painter thinks: up
         # means a bigger, softer highlight. Kept in sync with that row by the
         # docker, since two sliders own one engine value.
         self.highlight_size = self._add_slider(root, "Highlight size",
-                                                0, 100, highlight_size)
+                                                0, 100, highlight_size,
+                                                unit="none")
         set_tooltip(self.highlight_size, "Highlight size on the orb")
 
         qrow = QHBoxLayout()
@@ -486,7 +553,7 @@ class SettingsPanel(QWidget):
                 "border: 1px solid rgba(255,255,255,35); border-radius: 4px; "
                 "font-size: 9px; padding: 3px 0; }")
 
-    def _add_slider(self, root, label, lo, hi, value):
+    def _add_slider(self, root, label, lo, hi, value, unit="percent"):
         # Label column is wide enough for the longest caption ("Light azimuth
         # size"): at 74px it was truncated mid-word. The popup grows to fit,
         # which is the requested "slightly bigger" -- no fixed popup width to
@@ -501,26 +568,19 @@ class SettingsPanel(QWidget):
         sl = ColorSlider(Accent.NEUTRAL, Qt.Horizontal)
         sl.setRange(lo, hi)
         sl.setValue(value)
+        sl.setProperty("typed_unit", unit)
         rh.addWidget(sl, 1)
-        # Percent readout: position as % of range. Type a value to set it:
-        # a trailing % means percent-of-range, else the raw slider number.
-        # Click to type: a trailing % means percent-of-range, else the raw
-        # slider value.
-        val = QLineEdit()
-        val.setFixedWidth(40)
+        # Canonical-with-unit readout (86% / 309° / 64): self-describing,
+        # permissive on input via the shared parser. Enter commits; moving
+        # focus away reverts.
+        val = TypedReadout()
         val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        val.setFrame(False)
-        val.setStyleSheet(
-            "QLineEdit { color: #e2e6ef; font-size: 10px; "
-            "background: #262b35; border-radius: 3px; padding-right: 2px; }"
-            "QLineEdit:hover { background: #2e3440; }"
-            "QLineEdit:focus { background: #333a48; color: #ffffff; }"
-        )
         rh.addWidget(val)
         sl.valueChanged.connect(
-            lambda v, s=sl, w=val: w.setText(self._track_pct(s)))
-        val.setText(self._track_pct(sl))
-        val.editingFinished.connect(
+            lambda v, s=sl, w=val: w.mark_committed(
+                format_value(s.value(), s.property("typed_unit") or "percent")))
+        val.mark_committed(format_value(sl.value(), unit or "percent"))
+        val.returnPressed.connect(
             lambda s=sl, w=val: self._commit_typed(s, w))
         if not hasattr(self, "_readouts"):
             self._readouts = {}
@@ -530,28 +590,18 @@ class SettingsPanel(QWidget):
 
     @staticmethod
     def _commit_typed(sl, w) -> None:
-        """Commit a typed readout: '86%' is percent-of-range, else raw."""
-        try:
-            text = w.text().strip()
-            lo, hi = sl.minimum(), sl.maximum()
-            if text.endswith("%"):
-                frac = max(0.0, min(100.0, float(text[:-1]))) / 100.0
-                value = int(round(lo + frac * (hi - lo)))
-            else:
-                value = int(round(float(text)))
-            sl.setValue(max(lo, min(hi, value)))
-        except (TypeError, ValueError):
-            pass
-        finally:
-            w.setText(SettingsPanel._track_pct(sl))
-
-    @staticmethod
-    def _track_pct(sl) -> str:
-        """Handle position as a percentage of the slider's range."""
-        lo, hi = sl.minimum(), sl.maximum()
-        if hi <= lo:
-            return "0%"
-        return "%d%%" % round((sl.value() - lo) / (hi - lo) * 100)
+        """Commit a typed readout via the shared parser; flash on clamp."""
+        from .typed_entry import parse_typed_entry
+        unit = sl.property("typed_unit") or "percent"
+        result = parse_typed_entry(w.text(), sl.minimum(), sl.maximum(),
+                                   unit=unit)
+        if not result.valid:
+            w.mark_committed(format_value(sl.value(), unit or "percent"))
+            return
+        sl.setValue(int(round(result.value)))
+        w.mark_committed(format_value(sl.value(), unit or "percent"))
+        if result.was_clamped:
+            _flash_clamped(w)
 
     def _refresh_readouts(self) -> None:
         """Repaint every readout from its slider's current value.
@@ -560,7 +610,8 @@ class SettingsPanel(QWidget):
         live valueChanged handler never fires and the numbers go stale).
         """
         for sl, val in getattr(self, "_readouts", {}).items():
-            val.setText(self._track_pct(sl))
+            val.mark_committed(
+                format_value(sl.value(), sl.property("typed_unit") or "percent"))
 
     def _set_quality(self, res, name):
         self._quality = res

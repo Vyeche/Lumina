@@ -172,6 +172,15 @@ class ColorEngine:
         # Rolling render timings (last 10), for the perf log.
         self._timings: dict = {}
 
+        # Geometry/shading caches keyed by render size (Run-2): switching
+        # between the 96 px drag preview and the 200 px final used to
+        # regenerate ~40 ms of geometry on every switch. Grids are
+        # deterministic per size, so keep both warm. Shading additionally
+        # keys on light direction; both caches are FIFO-bounded so a
+        # quality-slider drag cannot grow them without limit.
+        self._geo_cache: dict = {}
+        self._shading_cache: dict = {}
+
         self._light_vector = (0.0, 0.0, 1.0)
         self._compute_shading()
         self._generate_geometry(self.resolution, self.resolution)
@@ -558,6 +567,31 @@ class ColorEngine:
         # Geometry changed: drop dependent stage caches.
         self._light_cache_key_value = None
         self._material_cache_key_value = None
+        self._geo_cache[(width, height)] = (
+            normals, masks, coverage, positions)
+        while len(self._geo_cache) > 6:
+            self._geo_cache.pop(next(iter(self._geo_cache)))
+
+    def _restore_geometry(self, width: int, height: int) -> bool:
+        """Restore cached grids for a previously built size. True on hit.
+
+        Stage caches key on size, so a restore keeps them valid -- no
+        invalidation, unlike a fresh generate above.
+        """
+        try:
+            entry = self._geo_cache.get((width, height))
+        except Exception:  # pragma: no cover - diagnostics only
+            return False
+        if entry is None:
+            return False
+        normals, masks, coverage, positions = entry
+        self._normal_grid = normals
+        self._mask_grid = masks
+        self._coverage_grid = coverage
+        self._pos_grid = positions
+        self._grid_width = width
+        self._grid_height = height
+        return True
 
     def _generate_normal_grid(self) -> None:
         self._generate_geometry(self.resolution, self.resolution)
@@ -566,6 +600,16 @@ class ColorEngine:
     # Light direction cache
     # ------------------------------------------------------------------
     def _compute_shading(self) -> None:
+        key = (self._grid_width, self._grid_height,
+               self.light_azimuth, self.light_elevation)
+        try:
+            entry = self._shading_cache.get(key)
+        except Exception:  # pragma: no cover - diagnostics only
+            entry = None
+        if entry is not None:
+            (self._light_vector, self._diffuse_cache,
+             self._shadow_cache, self._spec_cache) = entry
+            return
         azimuth = math.radians(self.light_azimuth)
         elevation = math.radians(self.light_elevation)
         self._light_vector = self._normalize3(
@@ -610,6 +654,11 @@ class ColorEngine:
             self._diffuse_cache = diffuse
             self._shadow_cache = shadow
             self._spec_cache = spec
+        self._shading_cache[key] = (
+            self._light_vector, self._diffuse_cache,
+            self._shadow_cache, self._spec_cache)
+        while len(self._shading_cache) > 12:
+            self._shading_cache.pop(next(iter(self._shading_cache)))
 
     def _compute_shading_cache(self) -> None:
         self._compute_shading()
@@ -1040,6 +1089,24 @@ class ColorEngine:
         if len(samples) > 10:
             del samples[:-10]
 
+    def clear_timing(self, *names: str) -> None:
+        """Drop rolling timing samples for the named stages.
+
+        Timings are last-10 averages, and some stages only record in one
+        mode: ``smooth`` records nothing when the blur is bypassed and
+        ``geometry`` nothing when the grid size is unchanged. Without a
+        reset, a mode switch leaves the log reprinting the *previous* mode's
+        costs indefinitely -- which once sent a real investigation after a
+        22 ms geometry ghost and a 45 ms smooth ghost. Callers clear on
+        render-profile transitions so each mode's log lines describe that
+        mode.
+        """
+        for name in names:
+            try:
+                self._timings.pop(name, None)
+            except Exception:  # pragma: no cover - diagnostics only
+                pass
+
     def _log_timings(self, width: int, height: int, total_ms: float) -> None:
         now = time.perf_counter()
         if now - getattr(self, "_last_timing_log", 0.0) < 2.0:
@@ -1061,10 +1128,15 @@ class ColorEngine:
         t_total = time.perf_counter()
 
         if self._grid_width != width or self._grid_height != height:
-            t_geo = time.perf_counter()
-            self._generate_geometry(width, height)
-            self._compute_shading()
-            self._record_timing("geometry", (time.perf_counter() - t_geo) * 1000.0)
+            if not self._restore_geometry(width, height):
+                t_geo = time.perf_counter()
+                self._generate_geometry(width, height)
+                self._compute_shading()
+                self._record_timing("geometry", (time.perf_counter() - t_geo) * 1000.0)
+            else:
+                # Warm size: shading hits its own cache (keyed on size and
+                # light direction), so the switch costs a dict lookup.
+                self._compute_shading()
 
         # Input colors are sRGB values at the plugin boundary. Convert them once
         # and use linear RGB for all interpolation and lighting.

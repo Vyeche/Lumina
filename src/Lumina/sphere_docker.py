@@ -56,7 +56,8 @@ from .color_processor import SphereColorProcessor
 from .color_engine import SPEC_KNEE, SPEC_KNEE_MIN, SPEC_KNEE_MAX
 from .sphere_widget import SphereWidget
 from .color_controls import (Accent, ColorSampler, ColorSlider,
-                             CollapsibleSection, SettingsPanel)
+                             CollapsibleSection, SettingsPanel,
+                             TypedReadout, _flash_clamped)
 from .tooltip import set_tooltip as _set_tooltip
 from .tooltip import TOOLTIP_BG, TOOLTIP_FG, TOOLTIP_BORDER
 
@@ -69,14 +70,26 @@ import os
 
 try:
     _LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lumina_log.txt")
-    logging.basicConfig(
-        filename=_LOG_PATH,
-        level=logging.DEBUG,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
     LOG = logging.getLogger("Lumina")
+    LOG.setLevel(logging.DEBUG)
+    # Attach our own file handler explicitly. logging.basicConfig() was a
+    # no-op whenever the host (or another plugin) had already configured the
+    # root logger, which silently left lumina_log.txt empty under flatpak.
+    _want = os.path.abspath(_LOG_PATH)
+    _has_file = any(
+        isinstance(h, logging.FileHandler)
+        and os.path.abspath(getattr(h, "baseFilename", "") or "") == _want
+        for h in LOG.handlers
+    )
+    if not _has_file:
+        _fh = logging.FileHandler(_LOG_PATH)
+        _fh.setLevel(logging.DEBUG)
+        _fh.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        LOG.addHandler(_fh)
 except Exception as exc:  # pragma: no cover - logging must never break the plugin
     print(f"Lumina: logging setup failed - {exc}")
+    LOG = logging.getLogger("Lumina")
 
 
 
@@ -97,6 +110,20 @@ ORB_RENDER = 200        # engine render resolution (square)
 # release.
 DRAG_RENDER = 96
 DRAG_THROTTLE_MS = 30.0
+# External foreground-color stream (native picker drags): render at most
+# this often, with exactly one full-quality final at declared stream end.
+# ~50 ms preview ~= 20 FPS; the end detector needs ~400 ms of confirmed
+# inactivity (8 unchanged 50 ms polls, ~400 ms) before the blocking full
+# render. Deliberately longer than the ~230 ms pauses inside a legitimate
+# drag: a delayed final beats a mid-drag freeze. Lower once the full-render
+# cost itself comes down.
+EXT_RENDER_MS = 50
+EXT_END_POLLS = 8
+# Post-stream persistence delay: sync() waits this long past stream end so a
+# pause-then-resume never eats disk latency mid-gesture.
+STREAM_END_SAVE_MS = 500
+# Disk persistence: ordinary changes wait this long of quiet for one write.
+SAVE_DEBOUNCE_MS = 2000
 # Settings schema version. v1 stored Tone as brightness (bug); v2 stores Tone
 # as saturation. v3 persists spec_max. v4 migrates Diffuse/highlight-size
 # slider levels to the perceptual curves (old linear positions reinterpreted
@@ -290,37 +317,32 @@ QToolTip {{
 # ---------------------------------------------------------------------------
 # Small helper widgets
 # ---------------------------------------------------------------------------
-def parse_typed_slider_value(text, lo, hi):
-    """Parse a typed slider readout: '86%' is percent-of-range, else raw.
+def parse_typed_slider_value(text, lo, hi, unit="percent"):
+    """Shared typed-entry parsing (see :mod:`typed_entry`).
 
-    Pure function (no Qt) so the parsing contract is unit-testable without
-    a display. Returns the clamped int, or None when the text is not a
-    number at all (caller reverts to the slider's value).
+    Kept as a thin wrapper so existing callers and tests keep working.
+    Returns the clamped int, or None when the text is not a number.
     """
-    try:
-        text = text.strip()
-        if text.endswith("%"):
-            frac = max(0.0, min(100.0, float(text[:-1]))) / 100.0
-            return int(round(lo + frac * (hi - lo)))
-        return max(lo, min(hi, int(round(float(text)))))
-    except (TypeError, ValueError):
+    from .typed_entry import parse_typed_entry
+    result = parse_typed_entry(text, lo, hi, unit=unit)
+    if not result.valid:
         return None
+    return max(lo, min(hi, int(round(result.value))))
 
 
-def format_slider_value(v, percent):
-    """Display text for a slider value. Pure function for the same reason."""
-    if percent:
-        return "%d%%" % int(v)
-    return str(int(v))
+def format_slider_value(v, unit="percent"):
+    """Display text for a slider value. Thin wrapper, see :mod:`typed_entry`."""
+    from .typed_entry import format_slider_value as _fmt
+    return _fmt(v, unit)
 
 
 class LabeledSliderRow(QWidget):
     """A single-row control: accent dot + icon label + color-coded slider."""
 
     def __init__(self, accent: Accent, label: str, value: int = 50, parent=None,
-                 lo: int = 0, hi: int = 100, percent: bool = True):
+                 lo: int = 0, hi: int = 100, unit: str = "percent"):
         super().__init__(parent)
-        self._percent = percent
+        self._unit = unit
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(10)
@@ -354,37 +376,38 @@ class LabeledSliderRow(QWidget):
         self.slider.setValue(value)
         layout.addWidget(self.slider, 1)
 
-        # Live value readout at the right end, like the settings sliders:
-        # percent for percent rows, the raw number for Hue (0-359) and
-        # Specular (1-64) where a % sign would lie. Click to type a value:
-        # a trailing % means percent-of-range, otherwise the raw number.
-        self._value = QLineEdit()
-        self._value.setFixedWidth(40)
+        # Live value readout at the right end: an editable TypedReadout.
+        # Display is canonical-with-unit (86% / 323° / 64); typing stays
+        # permissive via the shared parser. Enter commits; moving focus
+        # away reverts half-typed text.
+        self._value = TypedReadout()
         self._value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self._value.setFrame(False)
-        # Light backdrop marks it editable; brightens on hover/focus.
-        self._value.setStyleSheet(
-            f"QLineEdit {{ color: {TEXT_DIM.name()}; font-size: 10px; "
-            f"background: #262b35; border-radius: 3px; padding-right: 2px; }}"
-            f"QLineEdit:hover {{ background: #2e3440; }}"
-            f"QLineEdit:focus {{ background: #333a48; color: #e7eaf2; }}"
-        )
         layout.addWidget(self._value)
         self.slider.valueChanged.connect(
-            lambda v: self._value.setText(self._format_value(v)))
-        self._value.setText(self._format_value(value))
-        self._value.editingFinished.connect(self._on_value_typed)
+            lambda v: self._value.mark_committed(self._format_value(v)))
+        self._value.mark_committed(self._format_value(value))
+        self._value.returnPressed.connect(self._on_value_typed)
 
     def _format_value(self, v) -> str:
-        return format_slider_value(v, self._percent)
+        return format_slider_value(v, self._unit)
 
     def _on_value_typed(self) -> None:
-        """Commit a typed value: '85%' is percent-of-range, '85' is raw."""
-        value = parse_typed_slider_value(self._value.text(), self.slider.minimum(), self.slider.maximum())
-        if value is None:
-            self._value.setText(self._format_value(self.slider.value()))
-        else:
-            self.set_value(value)
+        """Commit a typed value through the shared parser."""
+        from .typed_entry import parse_typed_entry
+        result = parse_typed_entry(self._value.text(),
+                                   self.slider.minimum(),
+                                   self.slider.maximum(),
+                                   unit=self._unit)
+        if not result.valid:
+            self._value.mark_committed(
+                self._format_value(self.slider.value()))
+            return
+        canonical = max(self.slider.minimum(), min(
+            self.slider.maximum(), int(round(result.value))))
+        self.set_value(canonical)
+        self._value.mark_committed(self._format_value(canonical))
+        if result.was_clamped:
+            _flash_clamped(self._value)
 
     def value(self) -> int:
         return self.slider.value()
@@ -393,7 +416,7 @@ class LabeledSliderRow(QWidget):
         self.slider.setValue(value)
         # setValue with blocked signals (reset/sync paths) skips
         # valueChanged, so refresh the readout explicitly.
-        self._value.setText(self._format_value(value))
+        self._value.mark_committed(self._format_value(value))
 
     def set_caption(self, text: str) -> None:
         """Change the row's label, keeping the caption width stable.
@@ -978,6 +1001,14 @@ class SphereDocker(DockWidget):
         self._settings_restored = False  # set when _load_settings finds saved state
         self._sync_guard = False       # blocks our own foreground echo
         self._awaiting_sampler = False # next canvas sample comes from the eyedropper
+        # Slider value that produced the current base color. The Base Level
+        # row scales *relatively* (new/old), so this is the anchor that makes
+        # a 100->70 drag telescope to exactly x0.70.
+        self._base_level_last = 100
+        # Hue/saturation of the last non-black base. Scaling to exactly zero
+        # destroys hue information (black x factor = black), so raising the
+        # slider again rebuilds from this memory instead of staying black.
+        self._base_level_hs = None
         self._sampler_timer = None
         self._sampler_baseline = None
         self._sampler_elapsed = 0
@@ -1010,6 +1041,40 @@ class SphereDocker(DockWidget):
         self._rebuild_timer.setInterval(0)
         self._rebuild_timer.timeout.connect(self._rebuild_orb_now)
 
+        # External foreground-color pipeline (native picker drags, palette
+        # picks): throttled previews while the stream is live, exactly one
+        # full-quality final at declared stream end, so the orb tracks at
+        # ~20 FPS with zero blocking renders mid-drag (Run-2).
+        self._ext_render_timer = QTimer(self)
+        self._ext_render_timer.setSingleShot(True)
+        self._ext_render_timer.setInterval(EXT_RENDER_MS)
+        self._ext_render_timer.timeout.connect(self._apply_external_color)
+        self._latest_external = None
+        self._last_applied_external = None
+        self._ext_render_pending = False
+        self._ext_unchanged = 0
+        # While an external stream is in flight we render the orb like a slider
+        # drag: smaller grid, blur off, throttled. The end detector restores
+        # full quality with a single final render.
+        self._external_preview = False
+        self._ext_smooth_saved = None
+        # Instrumentation for one instrumented native-picker drag. Read back
+        # from lumina_log.txt to see whether renders-per-apply is 1 or worse,
+        # and whether any single render spikes (avg hides hitches).
+        self._ext_applies = 0
+        self._ext_renders = 0
+        self._ext_render_ms = 0.0
+        self._ext_render_samples = []
+        self._ext_final_pending = False
+
+        # Persistence debounce: a drag fires dozens of changes but needs one
+        # disk write. Explicit actions save immediately (see callers).
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(SAVE_DEBOUNCE_MS)
+        self._save_timer.timeout.connect(self._flush_settings)
+        self._settings_dirty = False
+
         # --- Primary sliders: edit the active target + contrast ---
         # Row defaults are read from the engine rather than hardcoded. Four of
         # them were lying: the panel opened showing Contrast 50, Intensity 70
@@ -1018,7 +1083,7 @@ class SphereDocker(DockWidget):
         # first drag produced a large jump from an unrelated starting point.
         _eng = self.processor.engine
         self.hue_row = LabeledSliderRow(Accent.NEUTRAL, "Hue", 0, hi=359,
-                                        percent=False)
+                                        unit="degree")
         self.saturation_row = LabeledSliderRow(Accent.NEUTRAL, "Saturation", 0)
         # Light (HSV value) belongs to the base target only. The shadow and
         # light targets deliberately keep just Hue and Saturation: they are
@@ -1055,7 +1120,7 @@ class SphereDocker(DockWidget):
         # 1..128, so the row spans exactly that.
         self.specular_row = LabeledSliderRow(Accent.CYAN, "Specular",
                                              int(round(_eng.shininess)), lo=1, hi=64,
-                                             percent=False)
+                                             unit="none")
         # Diffuse is the other half of the highlight: Specular sets how wide the
         # sheen is, Diffuse how softly it falls off. They sit together so the
         # relationship is obvious rather than split across two panels.
@@ -2038,21 +2103,14 @@ class SphereDocker(DockWidget):
             # it, or a highlight darker than its own base, which is exactly the
             # relationship the derivation exists to hold.
             self.light_row.setVisible(self._active_target == "base")
-            # Base Level scales the base multiplicatively, so at a near-black
-            # base there is nothing to scale (0 x factor = 0). Grey the row
-            # out below ~3% max-channel rather than presenting a dead
-            # control; the engine math is untouched. Gated on max RGB, not
-            # luma, so a dark saturated red still counts as real base
-            # information.
-            base = self._targets["base"]
-            has_base = max(base.redF(), base.greenF(), base.blueF()) >= 0.03
-            self.color_row.setEnabled(has_base)
-            if has_base:
-                _set_tooltip(self.color_row, "Overall brightness of the base color")
-            else:
-                _set_tooltip(self.color_row,
-                             "Base Level needs a non-black base: raise the base "
-                             "value to adjust it")
+            # Base Level stays enabled at every level. It used to grey out
+            # below ~3% max-channel, which trapped the slider: a disabled row
+            # cannot be dragged back up, so the only recovery was Reset.
+            # Near-black scales back up fine (0.02 x 25 = 0.5); only exact
+            # zero loses hue, and that is recovered from hue/saturation memory
+            # in _on_color_changed. The engine math is untouched.
+            self.color_row.setEnabled(True)
+            _set_tooltip(self.color_row, "Overall brightness of the base color")
             # Name the target these rows are editing. Now that Light applies to
             # all three, "Light" alone is ambiguous: it could mean the base's
             # lightness or the highlight's.
@@ -2346,6 +2404,10 @@ class SphereDocker(DockWidget):
                 self.processor.set_mixer_mode(str(s.value("mixer", "Blended")))
                 self.processor.set_light_type(str(s.value("light_type", "Sun")))
                 self.light_type_row.set_mode(str(s.value("light_type", "Sun")))
+                # Targets were restored as raw RGB above; anchor the relative
+                # scaler at 100 so applying the saved level matches the old
+                # absolute behavior (base x saved/100) on a fresh startup.
+                self._base_level_last = 100
                 self.color_row.set_value(int(num("base_level", 100, 0, 100)))
 
                 # Push the restored numbers back into the widgets, still inside
@@ -2441,6 +2503,10 @@ class SphereDocker(DockWidget):
                 eng.set_saturation(1.0)
                 self._orb_render_size = ORB_RENDER
                 self._orb.set_show_pointer(True)
+                # The base was assigned directly above, so anchor the relative
+                # scaler before moving the row: set_value(100) must be a no-op
+                # (100/100), not a 100/last rescale of the fresh default.
+                self._base_level_last = 100
                 self.color_row.set_value(100)
                 self.ambient_row.set_value(10)
                 self.intensity_row.set_value(100)
@@ -2473,7 +2539,9 @@ class SphereDocker(DockWidget):
             self._sync_target_buttons()
             self._sync_sliders_from_state()
             # Rebuilds and persists, since a reset is a change that must stick.
+            # Explicit action: save now rather than waiting out the debounce.
             self._rebuild_orb()
+            self._save_settings()
             self._update_preview()
             LOG.info("settings reset to defaults")
         except Exception as exc:  # pragma: no cover - UI only
@@ -2593,6 +2661,11 @@ class SphereDocker(DockWidget):
         size = int(getattr(self, "_orb_render_size", ORB_RENDER))
         if getattr(self, "_slider_dragging", False) and size > DRAG_RENDER:
             size = DRAG_RENDER
+        if getattr(self, "_external_preview", False) and size > DRAG_RENDER:
+            # Same reason as the slider drag above: a full-size render costs
+            # ~120 ms, so a native picker drag would run the shading loop at
+            # ~240% of one CPU slot and starve the event loop.
+            size = DRAG_RENDER
         return self.processor.render_image(self._rgb01(self._targets["base"]),
                                            size, size)
 
@@ -2620,14 +2693,15 @@ class SphereDocker(DockWidget):
         self._rebuild_orb()
 
     def _rebuild_orb(self):
-        """Schedule a coalesced orb rebuild and persist the new state.
+        """Schedule a coalesced orb rebuild and mark settings dirty.
 
-        Also the single choke point for autosaving. Every user-facing control
-        ends up here, so persisting from one place guarantees no control can be
-        added and quietly forgotten -- which is exactly what happened when each
-        handler saved individually. Guarded by ``_syncing`` so that loading
-        saved state, which also rebuilds, does not write the half-applied
-        intermediate values straight back over the file.
+        Persisting moved to a debounced flush (see _mark_settings_dirty):
+        every user-facing control still ends up saved exactly once, but a
+        drag no longer syncs the settings file to disk per change. Explicit
+        actions (Apply, Reset, preset, Save button, shutdown) save
+        immediately. Guarded by ``_syncing`` so that loading saved state,
+        which also rebuilds, does not write the half-applied intermediate
+        values straight back over the file.
 
         A single slider drag fires valueChanged dozens of times per second, and
         each render is a few tens of milliseconds of pure-Python shading. Queueing
@@ -2646,7 +2720,54 @@ class SphereDocker(DockWidget):
             if btn.isChecked():
                 btn.setChecked(False)
         if not getattr(self, "_syncing", False):
+            self._mark_settings_dirty()
+
+    def _mark_settings_dirty(self) -> None:
+        """Defer the settings write: one disk sync per gesture, not per change.
+
+        Ordinary control/slider changes land here; the 2 s single-shot timer
+        collapses a whole drag into a single write. While an external stream
+        is live (Run-2) this only marks: no disk I/O mid-drag. The end
+        detector flushes after stream end (see _arm_post_stream_save).
+        Explicit actions (Apply, Reset, preset choice, Save button) and
+        shutdown call :meth:`_save_settings` directly instead.
+        """
+        try:
+            self._settings_dirty = True
+            if getattr(self, "_external_preview", False):
+                return
+            timer = getattr(self, "_save_timer", None)
+            if timer is not None:
+                timer.start(SAVE_DEBOUNCE_MS)
+        except Exception:  # pragma: no cover - disk/IO only
+            pass
+
+    def _arm_post_stream_save(self) -> None:
+        """Flush pending settings ~500 ms after stream end, not with the render.
+
+        Gives the interaction breathing room: a pause-then-resume re-enters
+        preview (cancelling this timer in _note_external_color) instead of
+        eating disk latency. Persistence stays subordinate to the gesture.
+        """
+        try:
+            if not getattr(self, "_settings_dirty", False):
+                return
+            timer = getattr(self, "_save_timer", None)
+            if timer is not None:
+                timer.stop()
+                timer.start(STREAM_END_SAVE_MS)
+        except Exception:  # pragma: no cover - disk/IO only
+            pass
+
+    def _flush_settings(self) -> None:
+        """Write pending settings now; no-op when nothing changed."""
+        try:
+            if not getattr(self, "_settings_dirty", False):
+                return
+            self._settings_dirty = False
             self._save_settings()
+        except Exception:  # pragma: no cover - disk/IO only
+            LOG.exception("_flush_settings failed")
 
     def _rebuild_orb_now(self):
         """Render and display the orb immediately (bypasses the coalescer).
@@ -2654,7 +2775,8 @@ class SphereDocker(DockWidget):
         While dragging, renders are throttled to ~30ms so the handle tracks
         the pointer; the release always schedules a full-quality final.
         """
-        if getattr(self, "_slider_dragging", False):
+        if getattr(self, "_slider_dragging", False) or \
+                getattr(self, "_external_preview", False):
             now = time.monotonic()
             last = getattr(self, "_last_orb_ms", 0.0)
             gap_ms = (now - last) * 1000.0
@@ -2664,22 +2786,68 @@ class SphereDocker(DockWidget):
                     self._rebuild_orb_now)
                 return
             self._last_orb_ms = now
+        started = time.monotonic()
         self._orb.set_image(self._render_orb())
+        if getattr(self, "_external_preview", False):
+            self._ext_renders += 1
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            self._ext_render_ms += elapsed_ms
+            samples = getattr(self, "_ext_render_samples", None)
+            if samples is not None:
+                samples.append(elapsed_ms)
+        elif getattr(self, "_ext_final_pending", False):
+            # The trailing full-quality final runs here, async, after the
+            # burst summary already logged. Reported standalone so it is
+            # never misattributed to the next burst: this render is the
+            # prime hitch suspect for Run 1.
+            self._ext_final_pending = False
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            LOG.info("EXT_FINAL ms=%.1f", elapsed_ms)
 
     # ------------------------------------------------------------------
     # Row handlers -> engine setters + rebuild
     # ------------------------------------------------------------------
     def _on_color_changed(self, value):
-        """Advanced: scale the base target's overall level, preserving hue/sat."""
+        """Advanced: scale the base target's overall level, preserving hue/sat.
+
+        Scaling is relative to the value that produced the current base
+        (``_base_level_last``): each event multiplies by new/old, so a drag
+        from 100 to 70 telescopes to exactly x0.70 however many valueChanged
+        events fired in between. The old code multiplied the live base by
+        value/100 on *every* event, compounding to near-black after a few
+        dozen ticks -- which tripped the near-black guard, disabled the row
+        mid-drag, and froze the slider around 70%.
+        """
         try:
             LOG.info("_on_color_changed value=%d", value)
-            factor = max(0.0, min(1.0, value / 100.0))
+            value = max(0, min(100, int(value)))
+            last = max(0, min(100, int(getattr(self, "_base_level_last", 100))))
             base = self._targets["base"]
-            self._set_base_color(QColor.fromRgbF(
-                self._clamp01(base.redF() * factor),
-                self._clamp01(base.greenF() * factor),
-                self._clamp01(base.blueF() * factor),
-            ))
+            peak = max(base.redF(), base.greenF(), base.blueF())
+            if peak <= 0.0 and value > 0 and getattr(self, "_base_level_hs", None):
+                # Rising out of exact black: multiplication cannot recover
+                # hue, so rebuild from the remembered hue/saturation at the
+                # new level instead of staying black.
+                h, s = self._base_level_hs
+                self._set_base_color(QColor.fromHsvF(
+                    h, s, value / 100.0,
+                    max(0.0, min(1.0, base.alphaF()))))
+                self._base_level_last = value
+            else:
+                if peak > 0.0:
+                    h, s = base.getHsvF()[0], base.getHsvF()[1]
+                    self._base_level_hs = (max(0.0, h), max(0.0, min(1.0, s)))
+                if last > 0:
+                    scale = value / last
+                else:
+                    # Anchored at black with no memory: nothing to recover.
+                    scale = value / 100.0
+                self._set_base_color(QColor.fromRgbF(
+                    self._clamp01(base.redF() * scale),
+                    self._clamp01(base.greenF() * scale),
+                    self._clamp01(base.blueF() * scale),
+                ))
+                self._base_level_last = value
             self._rebuild_orb()
             self._sync_sliders_from_state()
             self._update_preview()
@@ -2896,6 +3064,8 @@ class SphereDocker(DockWidget):
             try:
                 self._apply_preset_values(preset["values"])
                 self._rebuild_orb()
+                # Explicit action: save now rather than waiting out the debounce.
+                self._save_settings()
             finally:
                 self._applying_preset = False
         except Exception as exc:
@@ -3047,19 +3217,201 @@ class SphereDocker(DockWidget):
             if cur is None:
                 return
             stored = self._targets["base"].getRgb()[:3]
-            LOG.info("_on_krita_color_changed -> %s vs stored %s", cur, stored)
             if cur != stored:
-                if getattr(self, "_awaiting_sampler", False):
-                    # A canvas sample from the eyedropper: build a full
-                    # lighting set around it rather than only moving base.
-                    self._apply_sampled_color(cur)
-                    return
-                self._set_base_color(QColor(*cur))  # int rgb
-                self._rebuild_orb()
-                self._sync_sliders_from_state()
-                self._update_preview()
+                self._note_external_color(
+                    cur, getattr(self, "_awaiting_sampler", False))
         except Exception as exc:  # pragma: no cover - Krita-only path
             LOG.exception("_on_krita_color_changed failed")
+
+    def _enter_external_preview(self) -> None:
+        """Drop to the drag render profile for the length of an external stream.
+
+        A native picker drag is a continuous stream, so it gets exactly the
+        treatment a slider drag already gets: the grid is capped at
+        ``DRAG_RENDER`` (~15 ms instead of ~120 ms at 200px) and the blur pass
+        is suspended. Without this the 50 ms throttle is meaningless -- a 120 ms
+        render can never keep up with a 50 ms cadence, and the event loop stays
+        saturated for the whole drag. :meth:`_apply_external_final` restores
+        full quality, which is where the image the user is left looking at comes
+        from.
+        """
+        if self._external_preview:
+            return
+        self._external_preview = True
+        try:
+            self._ext_smooth_saved = self.processor.engine.smooth
+            self.processor.set_smooth(0.0)
+            # The engine log is a rolling average; without this the preview
+            # lines would keep reprinting the full-quality smooth/geometry
+            # costs from before the stream started.
+            self.processor.engine.clear_timing("smooth", "geometry")
+        except Exception:  # pragma: no cover - UI only
+            LOG.exception("external preview enter failed")
+
+    def _exit_external_preview(self) -> None:
+        """Restore full render quality after the stream goes quiet."""
+        if not getattr(self, "_external_preview", False):
+            return
+        self._external_preview = False
+        try:
+            saved = getattr(self, "_ext_smooth_saved", None)
+            if saved is not None:
+                self.processor.set_smooth(saved)
+            self._ext_smooth_saved = None
+            # Symmetric with enter: the full-quality final must not average
+            # in the preview's cheaper samples.
+            self.processor.engine.clear_timing("smooth", "geometry")
+        except Exception:  # pragma: no cover - UI only
+            LOG.exception("external preview exit failed")
+
+    def _note_external_color(self, cur, full: bool) -> None:
+        """Single entry for the signal path and the poll path.
+
+        Records the newest color immediately, then renders at most every
+        EXT_RENDER_MS while the stream is live, so a native-picker drag
+        tracks at ~20 FPS instead of re-rendering per event. ``full``
+        selects full lighting derivation (sampler) versus base-only
+        tracking. Stream end is declared by the poll end detector (see
+        _note_external_unchanged), never by a quiet timer -- so no blocking
+        full render can fire mid-drag.
+        """
+        try:
+            was_preview = getattr(self, "_external_preview", False)
+            self._latest_external = (tuple(cur), bool(full))
+            self._enter_external_preview()
+            self._ext_unchanged = 0
+            if not was_preview:
+                # Re-entering after a declared end: cancel the post-stream
+                # save still waiting out its delay. The dirty flag stays set;
+                # the next stream end flushes.
+                timer = getattr(self, "_save_timer", None)
+                if timer is not None:
+                    timer.stop()
+            if not getattr(self, "_ext_render_pending", False):
+                self._ext_render_pending = True
+                self._ext_render_timer.start(EXT_RENDER_MS)
+        except Exception:  # pragma: no cover - UI only
+            LOG.exception("_note_external_color failed")
+
+    def _note_external_unchanged(self) -> None:
+        """One poll tick with no foreground change: the end detector.
+
+        After EXT_END_POLLS consecutive unchanged ticks inside a live
+        preview, the drag is declared over and exactly one full-quality
+        final is queued. The poll path only detects and transitions state;
+        it never renders (see _apply_external_final). A new color resets the
+        count in _note_external_color.
+        """
+        try:
+            if not getattr(self, "_external_preview", False):
+                return
+            n = int(getattr(self, "_ext_unchanged", 0)) + 1
+            self._ext_unchanged = n
+            if n >= EXT_END_POLLS:
+                self._ext_unchanged = 0  # queue once; re-armed by new color
+                QTimer.singleShot(0, self._apply_external_final)
+        except Exception:  # pragma: no cover - UI only
+            LOG.exception("_note_external_unchanged failed")
+
+    def _apply_external_color(self) -> None:
+        """Render the newest pending external color, if any.
+
+        One apply = one state update, one synchronization transaction, one
+        scheduled rebuild. The UI sync runs under ``_syncing`` so no row handler
+        fires a side effect of its own; the gradient tracks and preview are
+        refreshed explicitly here instead.
+        """
+        try:
+            if not getattr(self, "_ext_render_pending", False):
+                return
+            self._ext_render_pending = False
+            latest = getattr(self, "_latest_external", None)
+            if latest is None:
+                return
+            if getattr(self, "_syncing", False):
+                # Settings are being applied right now. Leave the color pending
+                # so the end-detector final picks it up rather than marking it
+                # applied and silently dropping it.
+                return
+            cur, full = latest
+            self._last_applied_external = latest
+            self._ext_applies += 1
+            LOG.info("EXT_APPLY seq=%d color=%s full=%s",
+                     self._ext_applies, cur, full)
+            if full:
+                self._apply_sampled_color(cur)
+            else:
+                self._set_base_color(QColor(*cur))  # int rgb
+                # _syncing already guards the setValue calls inside
+                # _sync_sliders_from_state; the effects its row handlers would
+                # have had are replayed once, here, after the sync.
+                self._sync_sliders_from_state()
+                self._rebuild_orb()
+                self._update_preview()
+        except Exception:  # pragma: no cover - Krita-only path
+            LOG.exception("_apply_external_color failed")
+
+    @staticmethod
+    def _render_stats(samples):
+        """avg/p95/max of individual render durations.
+
+        Avg alone hides a single 200 ms hitch inside eighteen 30 ms renders
+        (avg 39 ms looks fine); max reveals it, p95 keeps one OS scheduling
+        fluke from dominating the story.
+        """
+        samples = list(samples or [])
+        if not samples:
+            return (0.0, 0.0, 0.0)
+        ordered = sorted(samples)
+        avg = sum(samples) / len(samples)
+        p95 = ordered[min(len(ordered) - 1, int(0.95 * (len(ordered) - 1)))]
+        return (avg, p95, ordered[-1])
+
+    def _apply_external_final(self) -> None:
+        """Exactly one full-quality render at declared stream end, then save.
+
+        Queued by the end detector -- never called from the poll tick, so
+        the poll path stays detection-only. Applies any color newer than the
+        last throttle tick, leaves preview mode (restores full quality),
+        renders once, logs the burst summary, and arms the post-stream save
+        flush. A new external color cancels the pending save and re-enters
+        preview (see _note_external_color).
+
+        Invariant: preview path renders cheap only, this path renders the
+        one full image, the poll path renders nothing.
+        """
+        try:
+            if not getattr(self, "_external_preview", False):
+                return  # double-queued, or a color already re-armed preview
+            if getattr(self, "_syncing", False):
+                # Settings mid-apply: retry shortly instead of rendering a
+                # half-applied state. Preview stays on; the end detector
+                # re-queues if the stream is truly over.
+                QTimer.singleShot(50, self._apply_external_final)
+                return
+            latest = getattr(self, "_latest_external", None)
+            self._exit_external_preview()
+            if latest is not None and \
+                    latest != getattr(self, "_last_applied_external", None):
+                self._ext_render_pending = True
+                self._apply_external_color()
+            # Always schedule one final: if the last throttle tick already
+            # applied this color, the orb is still sitting on the 96px blurred
+            # preview and the full-quality image still has to be produced.
+            # Flagged so _rebuild_orb_now logs it standalone as EXT_FINAL.
+            self._ext_final_pending = True
+            self._rebuild_orb()
+            avg, p95, peak = self._render_stats(
+                getattr(self, "_ext_render_samples", None) or [])
+            LOG.info("EXT_SUMMARY applies=%d renders=%d avg_ms=%.1f p95_ms=%.1f max_ms=%.1f (final)",
+                     self._ext_applies, self._ext_renders, avg, p95, peak)
+            self._ext_applies = 0
+            self._ext_renders = 0
+            self._ext_render_ms = 0.0
+            self._ext_render_samples = []
+            self._arm_post_stream_save()
+        except Exception:  # pragma: no cover - Krita-only path
+            LOG.exception("_apply_external_final failed")
 
     def _watch_krita_colors(self):
         """Attach to View color-change signals where available (Krita >=6.0.3)."""
@@ -3082,6 +3434,12 @@ class SphereDocker(DockWidget):
                         LOG.info(f"connected view.{sig_name}")
                     except Exception as exc:  # pragma: no cover - Krita-only path
                         LOG.exception(f"connect {sig_name} failed")
+                else:
+                    # Permanent record of poll-only mode: the View object has
+                    # no such signal (not a connection bug on our side), so the
+                    # native C++ provider signal is unreachable from Python.
+                    LOG.info("view.%s unavailable (%r) - poll-only",
+                             sig_name, signal)
             self._watchers_armed = True
         except Exception as exc:  # pragma: no cover - Krita-only path
             LOG.exception("_watch_krita_colors failed")
@@ -3141,6 +3499,14 @@ class SphereDocker(DockWidget):
                 timer.stop()
         except Exception:  # pragma: no cover
             pass
+        for _name in ("_ext_render_timer",
+                      "_save_timer", "_rebuild_timer"):
+            try:
+                timer = getattr(self, _name, None)
+                if timer is not None:
+                    timer.stop()
+            except Exception:  # pragma: no cover
+                pass
         try:
             view = self._active_view()
             for sig_name, _conn in getattr(self, "_krita_connections", []):
@@ -3158,6 +3524,8 @@ class SphereDocker(DockWidget):
     def closeEvent(self, event):
         try:
             LOG.info("closeEvent")
+            # Flush any debounced settings write before teardown stops timers.
+            self._flush_settings()
             self._teardown()
             super().closeEvent(event)
         except Exception as exc:
@@ -3299,11 +3667,26 @@ class SphereDocker(DockWidget):
         return None
 
     def _restore_previous_tool(self) -> None:
-        """Hand the previous tool back so picking can be repeated."""
+        """Hand the previous tool back so picking can be repeated.
+
+        Only ever runs for a sample the eyedropper actually asked for. It used
+        to run from ``_apply_sampled_color``'s finally-block for *every*
+        foreground change, and ``_sampler_prev_tool`` was never cleared once
+        set -- so after one eyedropper use, every native-picker drag event
+        triggered a Krita tool action, re-armed the 200 ms poll and unset the
+        button, on every tick. Triggering an action walks all of Krita's
+        action list and switches tools, which is exactly the kind of thing that
+        makes the whole application feel sluggish mid-drag.
+        """
         name = getattr(self, "_sampler_prev_tool", None)
         if not name:
             return
         try:
+            btn = getattr(self, "_eyedropper_btn", None)
+            if btn is None or not btn.isChecked():
+                # Not an eyedropper-armed sample (a native picker change, or the
+                # user already cancelled). Leaving the tool alone is correct.
+                return
             from krita import Krita
             app = Krita.instance()
             for a in app.actions():
@@ -3311,21 +3694,26 @@ class SphereDocker(DockWidget):
                     a.trigger()
                     self._eyedropper_btn.setChecked(False)
                     LOG.info("returned to tool %s after sampler pick", name)
-                    # Re-arm so the next canvas click samples again.
+                    # Re-arm so the next canvas click samples again, and forget
+                    # the tool so nothing else can fire this path.
+                    self._sampler_prev_tool = None
                     self._start_sampler_watch()
                     return
         except Exception as exc:  # pragma: no cover - Krita-only path
             LOG.exception("_restore_previous_tool failed")
 
     # --- Foreground watcher -------------------------------------------------
-    # A 200 ms QTimer that reads the brush colour and redistributes it across
+    # A 50 ms QTimer that reads the brush colour and redistributes it across
     # base/light/shadow. Started from __init__, so it runs for as long as the
     # docker is loaded.
     #
     # It exists because ``View.foregroundColorChanged`` is exposed on Krita 5.x
     # but never actually emitted, so _watch_krita_colors connects signals that
     # never fire. Polling is the only thing that makes external colour picks
-    # reach the orb.
+    # reach the orb. The native C++ KisCanvasResourceProvider::sigFGColorChanged
+    # exists but is not exposed through the public Python API, so no private
+    # bridge -- just a fast poll. Each tick's read cost is self-measured (see
+    # POLL_COST in the log); 50 ms keeps detection at the render throttle rate.
     #
     # What it touches, exhaustively:
     #   reads  View.foregroundColor() -> an (r,g,b) int tuple, kept in _sampler_baseline
@@ -3337,7 +3725,7 @@ class SphereDocker(DockWidget):
     # foreground change from *any* source (palette, colour selector docker, a
     # script) is treated as a fresh sample and redistributed, not just the
     # eyedropper. That is the intended behaviour, not an accident.
-    SAMPLER_POLL_MS = 200
+    SAMPLER_POLL_MS = 50
 
     def _start_sampler_watch(self) -> None:
         """Begin/refresh the persistent foreground watcher.
@@ -3353,21 +3741,39 @@ class SphereDocker(DockWidget):
         self._sampler_timer.start()
 
     def _poll_sampler(self) -> None:
-        """Distribute whenever the foreground colour changes externally.
+        """Feed the shared external-color pipeline on foreground change.
 
         Compares against the last-seen value and does nothing on a tick where
-        the brush colour is unchanged, so an idle poll is three cheap property
-        reads and an int-tuple compare. The colour itself is never persisted;
-        only the derived lighting setup is, via the normal settings save.
+        the brush colour is unchanged, so an idle poll is one foreground read
+        and an int-tuple compare. Rendering itself is throttled in
+        _note_external_color; the poll never renders directly.
+
+        The read cost is self-measured once per session (POLL_COST in the
+        log): the first 100 ticks time ``_current_krita_rgb()`` and report
+        avg/max. That line is the evidence the 50 ms interval is cheap.
         """
         try:
             if self._sync_guard:
                 return          # this change is our own echo; ignore it
+            t0 = time.monotonic()
             cur = self._current_krita_rgb()
-            if cur is None or cur == self._sampler_baseline:
+            read_ms = (time.monotonic() - t0) * 1000.0
+            if not getattr(self, "_poll_cost_logged", False):
+                costs = getattr(self, "_poll_cost_ms", None)
+                if costs is None:
+                    costs = self._poll_cost_ms = []
+                costs.append(read_ms)
+                if len(costs) >= 100:
+                    self._poll_cost_logged = True
+                    LOG.info("POLL_COST n=%d avg=%.3fms max=%.3fms",
+                             len(costs), sum(costs) / len(costs), max(costs))
+            if cur is None:
+                return
+            if cur == self._sampler_baseline:
+                self._note_external_unchanged()
                 return
             self._sampler_baseline = cur
-            self._apply_sampled_color(cur)
+            self._note_external_color(cur, True)
         except Exception as exc:  # pragma: no cover - Krita-only path
             LOG.exception("_poll_sampler failed")
 

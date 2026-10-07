@@ -90,11 +90,13 @@ Every slider shows its value at the right end.
 
 #### Typing values
 
-Click a value and type to set it directly. A trailing `%` means
-percent-of-range (`86%` on a 0–200 row sets 172); otherwise the number is the
-raw slider value. Hue shows degrees and Specular its 1–64 range, without a
-`%` sign. Anything outside the range is clamped, and non-numeric input is
-ignored (the readout snaps back).
+Click a value and type to set it directly. Display is always
+canonical-with-unit: percent rows show `86%`, angle rows `323°`, unitless
+rows `64`. Typing stays permissive: `86` and `86%` both work on percent
+rows, `86`/`86°`/`86deg` on angle rows; anything outside the range is
+clamped with a brief amber flash, and non-numeric input is ignored (the
+readout snaps back). Press Enter to commit; clicking away reverts
+half-typed text.
 
 | Slider | Range | What it does |
 |---|---|---|
