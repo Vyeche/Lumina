@@ -315,19 +315,42 @@ def test_base_level_reset_anchor_is_noop():
 
 @requires_qt
 def test_lumina_logger_has_file_handler():
-    """The Lumina logger must own a lumina_log.txt FileHandler.
+    """The Lumina logger must own a lumina_log.txt file handler.
 
     Regression: logging.basicConfig() is a no-op when the host already
     configured root logging, which left the log file empty under flatpak.
     """
     _app_or_skip()
-    import logging
     import os as _os
+    from Lumina import lumina_logging as _ll
     from Lumina import sphere_docker as _sd
     paths = [ _os.path.abspath(getattr(h, "baseFilename", "") or "")
               for h in _sd.LOG.handlers
-              if isinstance(h, logging.FileHandler) ]
+              if isinstance(h, _ll.ReopenFileHandler) ]
     assert any(p.endswith("lumina_log.txt") for p in paths), paths
+
+
+@requires_qt
+def test_log_handler_never_holds_file_open():
+    """Emitting must not leave an open handle on lumina_log.txt.
+
+    Regression (Windows): a permanently-open FileHandler locks the file,
+    so Krita's plugin importer fails with PermissionError [WinError 32]
+    when deleting the old plugin directory on reinstall.
+    """
+    _app_or_skip()
+    import logging as _logging
+    from Lumina import lumina_logging as _ll
+    from Lumina import sphere_docker as _sd
+    _sd.LOG.info("handler-hold-probe")
+    for h in _sd.LOG.handlers:
+        if isinstance(h, _ll.ReopenFileHandler):
+            assert not hasattr(h, "stream"), "handler holds file open"
+    # No duplicate handlers after re-import (reload-safe guard).
+    import importlib as _il
+    _il.reload(_ll)
+    count = sum(isinstance(h, _ll.ReopenFileHandler) for h in _sd.LOG.handlers)
+    assert count == 1, count
 
 
 @requires_qt

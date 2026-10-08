@@ -494,6 +494,35 @@ flatpak run org.kde.krita
 
 ---
 
+### Issue 2: Reinstall Fails on Windows — `lumina_log.txt` Locked (WinError 32)
+
+**Symptoms** (Krita 5.x, Windows):
+```
+PermissionError: [WinError 32] The process cannot access the file because
+it is being used by another process:
+'...\AppData\Roaming\krita\pykrita\Lumina\lumina_log.txt'
+```
+thrown from `plugin_importer.py` (`shutil.rmtree`) during
+Tools → Scripts → Import Python Plugin from File.
+
+**Root Cause**:
+Versions ≤ 2.5.0 kept `lumina_log.txt` open with a permanent
+`FileHandler` for the whole session. Windows locks open files, so the
+importer's delete-the-old-directory step failed while Krita (running the
+old version) still held the log. Linux never showed this — it allows
+deleting open files.
+
+**Immediate workaround** (any version):
+1. Close Krita completely.
+2. Delete `%AppData%\krita\pykrita\Lumina` (and `Lumina.desktop`).
+3. Start Krita and import the zip again.
+
+**Fixed after 2.5.0**: logging moved to a shared `lumina_logging` module
+whose handler opens/appends/closes on every record and never holds the
+file open, so the importer can always delete the directory.
+
+---
+
 ### Issue 2: CanvasChange Not Called
 
 **Symptoms**:

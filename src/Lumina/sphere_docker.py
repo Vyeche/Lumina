@@ -62,34 +62,12 @@ from .tooltip import set_tooltip as _set_tooltip
 from .tooltip import TOOLTIP_BG, TOOLTIP_FG, TOOLTIP_BORDER
 
 # ---------------------------------------------------------------------------
-# Logging — write the full log to a file in the plugin directory so crashes are
-# captured even when Krita hides the terminal / no traceback is visible.
+# Logging — shared setup in lumina_logging (file handler never holds the
+# log open, so Windows reinstalls can delete the plugin directory).
 # ---------------------------------------------------------------------------
-import logging
 import os
 
-try:
-    _LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lumina_log.txt")
-    LOG = logging.getLogger("Lumina")
-    LOG.setLevel(logging.DEBUG)
-    # Attach our own file handler explicitly. logging.basicConfig() was a
-    # no-op whenever the host (or another plugin) had already configured the
-    # root logger, which silently left lumina_log.txt empty under flatpak.
-    _want = os.path.abspath(_LOG_PATH)
-    _has_file = any(
-        isinstance(h, logging.FileHandler)
-        and os.path.abspath(getattr(h, "baseFilename", "") or "") == _want
-        for h in LOG.handlers
-    )
-    if not _has_file:
-        _fh = logging.FileHandler(_LOG_PATH)
-        _fh.setLevel(logging.DEBUG)
-        _fh.setFormatter(logging.Formatter(
-            "%(asctime)s %(levelname)s %(name)s: %(message)s"))
-        LOG.addHandler(_fh)
-except Exception as exc:  # pragma: no cover - logging must never break the plugin
-    print(f"Lumina: logging setup failed - {exc}")
-    LOG = logging.getLogger("Lumina")
+from .lumina_logging import LOG
 
 
 

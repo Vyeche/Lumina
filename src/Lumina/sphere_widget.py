@@ -29,35 +29,10 @@ EDGE_GLIDE = 6.0
 ORB_MARGIN = 8.0
 
 # ---------------------------------------------------------------------------
-# Logging — write the full log to a file in the plugin directory so crashes are
-# captured even when Krita hides the terminal / no traceback is visible.
+# Logging — shared setup in lumina_logging (file handler never holds the
+# log open, so Windows reinstalls can delete the plugin directory).
 # ---------------------------------------------------------------------------
-import logging
-import os
-
-try:
-    _LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lumina_log.txt")
-    LOG = logging.getLogger("Lumina")
-    LOG.setLevel(logging.DEBUG)
-    # Same explicit handler as sphere_docker (same logger name): basicConfig
-    # was a no-op for whichever module imported second, and a no-op outright
-    # when the host had already configured root logging. The duplicate guard
-    # keeps a reload from stacking handlers.
-    _want = os.path.abspath(_LOG_PATH)
-    _has_file = any(
-        isinstance(h, logging.FileHandler)
-        and os.path.abspath(getattr(h, "baseFilename", "") or "") == _want
-        for h in LOG.handlers
-    )
-    if not _has_file:
-        _fh = logging.FileHandler(_LOG_PATH)
-        _fh.setLevel(logging.DEBUG)
-        _fh.setFormatter(logging.Formatter(
-            "%(asctime)s %(levelname)s %(name)s: %(message)s"))
-        LOG.addHandler(_fh)
-except Exception as exc:  # pragma: no cover - logging must never break the plugin
-    print(f"Lumina: logging setup failed - {exc}")
-    LOG = logging.getLogger("Lumina")
+from .lumina_logging import LOG
 
 
 class SphereWidget(QWidget):
