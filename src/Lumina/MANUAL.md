@@ -56,7 +56,7 @@ press Enter — the full lighting set is derived from it, like eyedropping.
 The previous box is display plus copy only. The
 lock state is saved with your settings.
 
-### The orb
+### The sphere
 
 A sphere lit by the three target colors. **Drag the color sampler** — the small
 ring that follows your pointer — to read the color under it; its centre always
@@ -137,7 +137,7 @@ not fit, so nothing spills out over the dockers below it:
 
 ### Presets
 
-One-click looks flanking the orb, three per side. Each sets the highlight color,
+One-click looks flanking the sphere, three per side. Each sets the highlight color,
 lighting sliders and mixer mode together (never the target colors):
 
 | Button | What it does |
@@ -196,9 +196,9 @@ Sampler, the palette, or the Color Selector docker.
 |---|---|
 | **Light azimuth** | Rotates the main light around the sphere, 0–359° (default 287°). |
 | **Light height** | Raises and lowers the light, 0–90° (default 45°). |
-| **Highlight size** | Highlight size on the orb, 0–100 (default 80). Up means a bigger, softer highlight. Drives the same sharpness as the Advanced **Specular** row, so the two stay in sync. |
+| **Highlight size** | Highlight size on the sphere, 0–100 (default 80). Up means a bigger, softer highlight. Drives the same sharpness as the Advanced **Specular** row, so the two stay in sync. |
 | **Quality** | Render grid size. *Low* is smoothest while dragging, *High* is finest. |
-| **Show color cursor** | Show or hide the ring that follows the pointer over the orb. It marks the exact pixel being read and previews that color; it does not magnify. |
+| **Show color cursor** | Show or hide the ring that follows the pointer over the sphere. It marks the exact pixel being read and previews that color; it does not magnify. |
 | **Use base color as brush** | Sends the **base color** to Krita's foreground. Use it after editing with the sliders, since slider edits do not touch the brush. |
 | **Reset all** | Restores every color and lighting value to its default, and saves that reset. |
 | **Save settings** | Writes your current setup to disk. Changes already save as you make them, so this is a checkpoint — it confirms the write rather than being the only chance to keep your work. |

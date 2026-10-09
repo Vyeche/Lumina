@@ -99,7 +99,7 @@ decisions and the reasoning behind each tuning constant.
 src/Lumina/
   __init__.py              Registers the dock widget factory with Krita
   sphere_docker.py         The docker: layout, controls, presets, persistence
-  sphere_widget.py         The orb: painting, picking, hover sampler
+  sphere_widget.py         The sphere: painting, picking, hover sampler
   color_engine.py          Pure-Python shading engine (no Qt, no Krita)
   color_processor.py       Adapter between the engine and Krita/Qt
   color_controls.py        Sliders, buttons, settings panel

@@ -62,11 +62,11 @@ bottom:
 |---|---|
 | Header | Gear (settings), the **original** and **active** color blocks, eyedropper — with copyable **hex values** under the blocks and an **EDIT** toggle for typing new ones. |
 | Lamp icons | **Point** / **Sun** / **Spot** / **Area** above the sphere. |
-| The orb | The shaded preview. Drag across it to sample a colour. |
+| The sphere | The shaded preview. Drag across it to sample a colour. |
 | Target dots + swatches | **Shadow**, **Base** and **Light** selectors; the active target's swatch grows with a white rim. |
 | Hue / Saturation / Light | Edits whichever target is active. |
 | Contrast / Intensity | Light falloff and scene light level. |
-| Presets | Six one-click looks, three per side of the orb. |
+| Presets | Six one-click looks, three per side of the sphere. |
 | Advanced | The remaining lighting sliders and settings. |
 
 Every slider shows its value at the right end — click the value to type a
@@ -88,7 +88,7 @@ brush on their own.
 ## 4. Pick your three colours
 
 Click a target glyph or its swatch to make it active, then move **Hue**,
-**Saturation** and **Light**. The orb re-renders live.
+**Saturation** and **Light**. The sphere re-renders live.
 
 `Light` applies to the base target only — shadow and light are derived from it,
 so the three stay a coherent set rather than three unrelated colours.
@@ -136,7 +136,7 @@ palette, the colour selector docker, or a script.
 
 ## 7. Sample the result into your brush
 
-**Click and drag on the orb.** Krita's foreground (brush) colour updates
+**Click and drag on the sphere.** Krita's foreground (brush) colour updates
 immediately, so you can paint with the value you just read. The button at the
 bottom of the panel sends the base colour across without a drag.
 

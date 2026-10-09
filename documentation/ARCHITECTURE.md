@@ -21,7 +21,7 @@ the previous wide, text-labeled panel.
 ```
 Lumina (Plugin)
 ├── SphereDocker (DockWidget) → Main UI container (V2 icon-driven sidebar)
-│   ├── SphereWidget (QWidget) → Renders small circular orb image
+│   ├── SphereWidget (QWidget) → Renders small circular sphere image
 │   │   └── PaintEvent → Draws QImage onto widget; mouse picking
 │   ├── Controls (ColorSlider, ToolButton) → User input
 │   └── SphereColorProcessor → Shading engine adapter
@@ -69,7 +69,7 @@ The V2 design shows a professional, compact sidebar. Key changes from v1:
 |----------|----------|
 | Wide text-labeled panel | Narrow vertical sidebar |
 | Plain QSliders with labels | Color-coded thin sliders (RGB-style accent tints) |
-| 200px square-ish orb | Small circular orb (120px) |
+| 200px square-ish sphere | Small circular sphere (120px) |
 | Text buttons | Icon-driven toggles with accent dots |
 
 ### Accent color palette
@@ -96,7 +96,7 @@ Accent.NEUTRAL = (160, 174, 193)  # generic
 | `color_engine.py` | Pure-Python shading engine (no Qt) |
 | `color_processor.py` | Krita-facing adapter over `ColorEngine` |
 | `color_controls.py` | Icon-driven, color-coded control widgets |
-| `sphere_widget.py` | Interactive orb surface with picking |
+| `sphere_widget.py` | Interactive sphere surface with picking |
 | `sphere_docker.py` | Main V2 docker widget |
 | `__init__.py` | Factory registration entry point |
 | `Lumina.desktop` | Plugin manifest |
@@ -187,7 +187,7 @@ last-picked brush colour and the active target, both per-session choices.
 
 Two design points worth keeping:
 
-- **Autosave is a single choke point**, in `_rebuild_orb`, not per-handler. Every
+- **Autosave is a single choke point**, in `_rebuild_sphere`, not per-handler. Every
   control already routes through it, so a control added later cannot be silently
   left unsaved — which is exactly what happened during development when each
   handler saved individually.
@@ -215,9 +215,9 @@ Two design points worth keeping:
 1. ✅ Sphere displays as full circle (not clipped)
 2. ✅ Colors vary from dark (shaded) to bright (lit)
 3. ✅ Base color updates the sphere
-4. ✅ Color-coded sliders change the orb appearance
+4. ✅ Color-coded sliders change the sphere appearance
 5. ✅ Icon toggles (Artistic/Real-World) respond to clicks
-6. ✅ Picking a color on the orb updates Krita foreground
+6. ✅ Picking a color on the sphere updates Krita foreground
 7. ✅ No errors in terminal output
 
 **Run Krita for 30 seconds** to allow the user to open an image and see the panel.

@@ -13,7 +13,7 @@ document links here rather than repeating the commands.
     ├── color_engine.py        ← pure-Python shading (no Qt)
     ├── color_processor.py     ← Krita-facing adapter
     ├── color_controls.py      ← control widgets
-    ├── sphere_widget.py       ← orb surface + picking
+    ├── sphere_widget.py       ← sphere surface + picking
     ├── sphere_docker.py       ← main docker
     └── MANUAL.html            ← shown under Help → Plugin Help
 ```
@@ -120,7 +120,7 @@ it is valid 3.13 bytecode matching current source.
 
 1. **View → Dock Widgets → Lumina** — the panel appears.
 2. The terminal shows no `ImportError` or `NameError`.
-3. The orb renders shaded, and the highlight reads as a soft sheen rather than a
+3. The sphere renders shaded, and the highlight reads as a soft sheen rather than a
    hard-edged disc.
 
 

@@ -12,7 +12,7 @@ frustrated when [...] while trying to [...] in my painting workflow.
 
 **Describe the solution you'd like**
 A clear and concise description of what you want to happen. Which part of
-the panel would it live in (orb, sliders, presets, eyedropper)?
+the panel would it live in (sphere, sliders, presets, eyedropper)?
 
 **Describe alternatives you've considered**
 Any alternative solutions or workarounds you've considered — including

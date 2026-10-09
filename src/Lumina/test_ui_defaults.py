@@ -168,7 +168,7 @@ def test_external_color_throttle_and_end_detector():
     d = SphereDocker()
     d._rebuild_timer = _NoopTimer()
     applied = []
-    d._rebuild_orb = lambda reason="live_update": applied.append(tuple(d._targets["base"].getRgb()[:3]))
+    d._rebuild_sphere = lambda reason="live_update": applied.append(tuple(d._targets["base"].getRgb()[:3]))
     for i in range(5):
         d._note_external_color((10 + i, 20, 30), False)
     # Nothing applied synchronously; only the newest is retained.
@@ -187,7 +187,7 @@ def test_external_color_throttle_and_end_detector():
     assert applied == [(14, 20, 30)], applied
     assert d._external_preview is True
     # ...until the end detector declares the stream over. The final pass
-    # always schedules one render: the throttle tick left the orb on the
+    # always schedules one render: the throttle tick left the sphere on the
     # reduced drag profile, and the image the user ends up looking at has
     # to be the full-quality one.
     d._note_external_unchanged()  # EXT_END_POLLS-th: queues final
@@ -213,7 +213,7 @@ def test_post_stream_save_armed_and_cancelled():
     from Lumina.sphere_docker import SphereDocker
     d = SphereDocker()
     d._rebuild_timer = _NoopTimer()
-    d._rebuild_orb = lambda reason="live_update": None
+    d._rebuild_sphere = lambda reason="live_update": None
     d._note_external_color((10, 20, 30), False)
     d._apply_external_color()
     assert d._settings_dirty is True
@@ -241,19 +241,19 @@ def test_external_stream_uses_drag_render_profile():
         sizes.append((w, h))
 
     d.processor.render_image = _fake_render
-    d._orb_render_size = 200
+    d._sphere_render_size = 200
     saved_smooth = d.processor.engine.smooth
 
     d._note_external_color((10, 20, 30), False)
     assert d._external_preview is True
     assert d.processor.engine.smooth == 0.0
-    d._render_orb()
+    d._render_sphere()
     assert sizes[-1] == (96, 96), sizes
 
     d._apply_external_final()
     assert d._external_preview is False
     assert d.processor.engine.smooth == saved_smooth
-    d._render_orb()
+    d._render_sphere()
     assert sizes[-1] == (200, 200), sizes
 
 
@@ -265,9 +265,9 @@ def test_settings_save_is_debounced_not_direct():
     d._rebuild_timer = _NoopTimer()
     saved = []
     d._save_settings = lambda: saved.append(1)
-    d._rebuild_orb()
-    d._rebuild_orb()
-    d._rebuild_orb()
+    d._rebuild_sphere()
+    d._rebuild_sphere()
+    d._rebuild_sphere()
     # Marked dirty, nothing written yet.
     assert saved == []
     assert d._settings_dirty is True
@@ -293,7 +293,7 @@ def test_base_level_drag_telescopes_to_exact_factor():
     from Lumina.sphere_docker import SphereDocker
     d = SphereDocker()
     d._rebuild_timer = _NoopTimer()
-    d._rebuild_orb = lambda reason="live_update": None  # scaling + sync logic is what is tested
+    d._rebuild_sphere = lambda reason="live_update": None  # scaling + sync logic is what is tested
     d._set_base_color(_QColor(255, 255, 255))
     d._base_level_last = 100
     for v in (95, 85, 75, 70):
@@ -314,7 +314,7 @@ def test_base_level_reset_anchor_is_noop():
     from Lumina.sphere_docker import SphereDocker
     d = SphereDocker()
     d._rebuild_timer = _NoopTimer()
-    d._rebuild_orb = lambda reason="live_update": None
+    d._rebuild_sphere = lambda reason="live_update": None
     d._set_base_color(_QColor(200, 100, 50))
     d._base_level_last = 100  # reset path anchors before set_value(100)
     before = d._targets["base"].getRgb()[:3]
@@ -371,7 +371,7 @@ def test_hex_labels_copy_and_toggle():
     from Lumina.sphere_docker import SphereDocker
     d = SphereDocker()
     d._rebuild_timer = _NoopTimer()
-    d._rebuild_orb = lambda reason="live_update": None
+    d._rebuild_sphere = lambda reason="live_update": None
     # Labels exist under their swatches and follow the colors.
     d._set_base_color(_QColor(255, 128, 0))
     d._original_color = _QColor(16, 32, 48)
@@ -409,22 +409,22 @@ def test_hex_labels_copy_and_toggle():
 
 @requires_qt
 def test_render_done_carries_trigger_reason():
-    """_rebuild_orb(reason=...) survives coalescing into RENDER_DONE."""
+    """_rebuild_sphere(reason=...) survives coalescing into RENDER_DONE."""
     _app_or_skip()
     from PyQt5.QtGui import QImage as _QI
     from Lumina.sphere_docker import SphereDocker
     d = SphereDocker()
     d._rebuild_timer = _NoopTimer()
     seen = []
-    d._orb.set_image = lambda img: seen.append(img)
-    d._render_orb = lambda: (
+    d._sphere.set_image = lambda img: seen.append(img)
+    d._render_sphere = lambda: (
         setattr(d, "_last_render_size", 96),
         setattr(d, "_last_render_smooth", 0.0),
         _QI(96, 96, _QI.Format_ARGB32),
     )[-1]
-    d._rebuild_orb(reason="slider_release")
+    d._rebuild_sphere(reason="slider_release")
     assert d._pending_reason == "slider_release"
-    d._rebuild_orb_now()
+    d._rebuild_sphere_now()
     assert len(seen) == 1
     assert d._pending_reason is None
     assert d._last_render_size == 96
@@ -448,7 +448,7 @@ def test_target_switch_logs_sync_stamp():
 
     d = SphereDocker()
     d._rebuild_timer = _NoopTimer()
-    d._rebuild_orb = lambda reason="live_update": None
+    d._rebuild_sphere = lambda reason="live_update": None
     probe = _Handler()
     from Lumina import sphere_docker as _sd
     _sd.LOG.addHandler(probe)
@@ -528,7 +528,7 @@ def test_hex_edit_commit_and_lock():
     from Lumina.sphere_docker import SphereDocker
     d = SphereDocker()
     d._rebuild_timer = _NoopTimer()
-    d._rebuild_orb = lambda reason="live_update": None
+    d._rebuild_sphere = lambda reason="live_update": None
     # Locked by default: fields read-only.
     assert d._hex_locked is True
     assert d._hex_current.isReadOnly()
@@ -585,7 +585,7 @@ def test_edge_samples_erode_inward_not_background():
     assert 0 <= sx < 200 and 0 <= sy < 200
     # The sticky band reaches ~30px past the rim: 10px out still projects...
     # (measured on the diagonal, where the widget bounds leave room; on the
-    # axes the 20px orb margin is the tighter limit).
+    # axes the 20px sphere margin is the tighter limit).
     sx, sy = w._to_sphere_coords(_QP(172.0, 172.0))
     assert (sx, sy) != (None, None), "10px past rim should still pick"
     # ...while well outside stays a dead zone.
@@ -601,7 +601,7 @@ def test_magenta_zone_hits_reference_triple():
     from Lumina.sphere_docker import SphereDocker
     d = SphereDocker()
     d._rebuild_timer = _NoopTimer()
-    d._rebuild_orb = lambda reason="live_update": None
+    d._rebuild_sphere = lambda reason="live_update": None
     d._distribute_from(_QColor("#743356"))
     shadow = d._targets["shadow"]
     light = d._targets["light"]
@@ -627,7 +627,7 @@ def test_derivation_zone_leaves_primaries_sane():
     from Lumina.sphere_docker import SphereDocker
     d = SphereDocker()
     d._rebuild_timer = _NoopTimer()
-    d._rebuild_orb = lambda reason="live_update": None
+    d._rebuild_sphere = lambda reason="live_update": None
     for hexv, h_lo, h_hi in (("#d93636", 350, 80),   # red: warm light, no magenta jump
                              ("#36d936", 80, 160),   # green: stays green-yellow
                              ("#3636d9", 230, 280)):  # blue: stays blue-violet
@@ -676,7 +676,7 @@ def test_red_falls_outside_magenta_zone():
     from Lumina.sphere_docker import SphereDocker
     d = SphereDocker()
     d._rebuild_timer = _NoopTimer()
-    d._rebuild_orb = lambda reason="live_update": None
+    d._rebuild_sphere = lambda reason="live_update": None
     assert d._magenta_weight(0.0) == 0.0
     d._distribute_from(_QColor("#ff0000"))
     sh = d._targets["shadow"].getHsvF()
@@ -692,7 +692,7 @@ def test_rim_tint_interlock_keeps_stored_value():
     from Lumina.sphere_docker import SphereDocker
     d = SphereDocker()
     d._rebuild_timer = _NoopTimer()
-    d._rebuild_orb = lambda reason="live_update": None
+    d._rebuild_sphere = lambda reason="live_update": None
     d.rim_mix_row.set_value(60)
     assert d.rim_mix_row.isEnabled()
     d.rim_row.set_value(0)
@@ -712,7 +712,7 @@ def test_base_level_low_end_never_freezes():
     from Lumina.sphere_docker import SphereDocker
     d = SphereDocker()
     d._rebuild_timer = _NoopTimer()
-    d._rebuild_orb = lambda reason="live_update": None
+    d._rebuild_sphere = lambda reason="live_update": None
     d._set_base_color(_QColor(255, 255, 255))
     d._base_level_last = 100
     for v in (50, 10, 2):
@@ -735,7 +735,7 @@ def test_base_level_recovers_hue_from_exact_black():
     from Lumina.sphere_docker import SphereDocker
     d = SphereDocker()
     d._rebuild_timer = _NoopTimer()
-    d._rebuild_orb = lambda reason="live_update": None
+    d._rebuild_sphere = lambda reason="live_update": None
     warm = _QColor(200, 100, 50)
     d._set_base_color(_QColor(warm))
     d._base_level_last = 100

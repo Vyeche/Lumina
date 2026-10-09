@@ -3,7 +3,7 @@
 Assembles the compact, icon-driven control panel:
 
     +-----------------------------------------------------+
-    |  [Orb]                                              |   <- SphereWidget (small circular orb)
+    |  [Sphere]                                              |   <- SphereWidget (small circular sphere)
     |            r,g,b                                     |
     +-----------------------------------------------------+
     | [Color] Base ▢                                       |
@@ -19,7 +19,7 @@ Key V2 design decisions implemented here:
     * Narrow vertical sidebar (not a wide text-labeled panel).
     * Color-coded thin sliders (RGB-style accent tints) instead of plain sliders.
     * Icon-driven toggles with accent dots, no text labels.
-    * Compact circular orb instead of a large square-ish one.
+    * Compact circular sphere instead of a large square-ish one.
     * All shading math delegated to the pure ``color_engine`` / ``color_processor``.
 """
 
@@ -80,11 +80,11 @@ from .lumina_logging import LOG
 # at 80: shininess = 1 + 63*(1-0.80)^2 = 3.52.
 SHININESS_REF = 3.52
 SHININESS_MAX = 64.0
-ORB_SIZE = 200          # diameter of the circular orb
-ORB_RENDER = 200        # engine render resolution (square)
+SPHERE_SIZE = 200          # diameter of the circular sphere
+SPHERE_RENDER = 200        # engine render resolution (square)
 # Ceiling on the render resolution while a slider is held down. Renders are
 # throttled to ~30 ms during drags and the blur pass is suspended, so 96 px
-# previews track the pointer; the full-resolution orb is drawn again on
+# previews track the pointer; the full-resolution sphere is drawn again on
 # release.
 DRAG_RENDER = 96
 DRAG_THROTTLE_MS = 30.0
@@ -225,7 +225,7 @@ _PRESETS = (
 
 HEADER_BTN = 38         # gear / eyedropper size in the header row
 PANEL_TOP_PAD = 13      # space above the header row (under the title bar)
-PANEL_ROW_GAP = 14      # space between the header row and the orb
+PANEL_ROW_GAP = 14      # space between the header row and the sphere
 TITLEBAR_BAND = 34     # height of the floating window's draggable title band
 # --- Deriving light and shadow from a sampled base color --------------------
 # A lit surface takes on the hue of the key light; a shadowed one the hue of the
@@ -827,7 +827,7 @@ class LightTypeIconRow(QWidget):
     """Lamp model selector: Point / Sun / Spot / Area as icon buttons.
 
     Lives in a row directly above the sphere, built like the preset cells
-    (glyph button + caption), since the lamp model visibly reshapes the orb.
+    (glyph button + caption), since the lamp model visibly reshapes the sphere.
     Same interface as the old segmented row: ``mode()``, ``set_mode()`` and
     the ``_on_mode_changed`` callback, so persistence and reset keep working.
     """
@@ -887,10 +887,10 @@ class LightTypeIconRow(QWidget):
 class SphereDocker(DockWidget):
     """The Lumina docker with a compact, icon-driven vertical sidebar.
 
-    The panel follows the Infinite Painter "Lighting Orb" layout (see issue #9):
+    The panel follows the Infinite Painter "Lighting Sphere" layout (see issue #9):
 
         header   [gear]  [base swatch, light|dark]  [eyedropper]
-        orb      large full circle with a draggable picker pointer
+        sphere      large full circle with a draggable picker pointer
         targets  shadow / base / light dots (active one ringed)
         sliders  Hue (rainbow) / Saturation (grey->hue) / Value (dark->light)
                  / Contrast (plain)
@@ -898,7 +898,7 @@ class SphereDocker(DockWidget):
         tools    artistic / real-world / pick-from-document / apply-to-foreground
     """
 
-    # Editable lighting targets. The orb always renders base + light + shadow
+    # Editable lighting targets. The sphere always renders base + light + shadow
     # together; the Hue / Saturation / Value sliders edit whichever target is
     # active, so the base color can be changed without disturbing the light and
     # shadow colors (per the reference manual).
@@ -991,9 +991,9 @@ class SphereDocker(DockWidget):
         # Left block of the split swatch: the committed "original" colour.
         # Seeded from the default base so it is never an empty placeholder.
         self._original_color = QColor(self.DEFAULT_TARGETS["base"])
-        # Colour chosen on the orb to draw with; shown in the active swatch.
+        # Colour chosen on the sphere to draw with; shown in the active swatch.
         self._chosen_color = None
-        self._chosen_color = None    # colour picked on the orb, shown in the active swatch
+        self._chosen_color = None    # colour picked on the sphere, shown in the active swatch
         # QColor.getHsvF() reports hue 0 for greys, so remember the last
         # meaningful hue per target and fall back to it when saturation is ~0.
         self._hue_memory = {k: 0.0 for k in self._targets}
@@ -1020,37 +1020,37 @@ class SphereDocker(DockWidget):
         self._sampler_baseline = None
         self._sampler_elapsed = 0
         self._sampler_prev_tool = None
-        self._orb_render_size = ORB_RENDER   # changed by the settings panel
+        self._sphere_render_size = SPHERE_RENDER   # changed by the settings panel
         self._slider_dragging = False        # True while a slider is held down
 
         # --- Shading engine (pure Python, no Qt) + Krita-facing processor ---
-        self.processor = SphereColorProcessor(resolution=ORB_RENDER)
+        self.processor = SphereColorProcessor(resolution=SPHERE_RENDER)
         LOG.info("processor ready")
 
-        # --- Interactive orb surface ---
-        self._orb = SphereWidget()
-        self._orb.set_hover_callback(self._on_orb_hover)
-        self._orb.set_brush_callback(self._on_orb_brush)
-        LOG.info("orb created + pick/hover wired")
+        # --- Interactive sphere surface ---
+        self._sphere = SphereWidget()
+        self._sphere.set_hover_callback(self._on_sphere_hover)
+        self._sphere.set_brush_callback(self._on_sphere_brush)
+        LOG.info("sphere created + pick/hover wired")
 
-        # Colour sampling ring drawn on top of the orb. It is a child of the orb
-        # so it can be positioned in the orb's own coordinates and follow the
+        # Colour sampling ring drawn on top of the sphere. It is a child of the sphere
+        # so it can be positioned in the sphere's own coordinates and follow the
         # pointer across the surface.
         self.cylinder = ColorSampler()
-        self._orb.set_preview_widget(self.cylinder)
+        self._sphere.set_preview_widget(self.cylinder)
         self.cylinder.hide()
 
-        # Coalescer for orb rebuilds. Created before the UI is built because
+        # Coalescer for sphere rebuilds. Created before the UI is built because
         # syncing slider values can fire valueChanged handlers that call
-        # _rebuild_orb().
+        # _rebuild_sphere().
         self._rebuild_timer = QTimer(self)
         self._rebuild_timer.setSingleShot(True)
         self._rebuild_timer.setInterval(0)
-        self._rebuild_timer.timeout.connect(self._rebuild_orb_now)
+        self._rebuild_timer.timeout.connect(self._rebuild_sphere_now)
 
         # External foreground-color pipeline (native picker drags, palette
         # picks): throttled previews while the stream is live, exactly one
-        # full-quality final at declared stream end, so the orb tracks at
+        # full-quality final at declared stream end, so the sphere tracks at
         # ~20 FPS with zero blocking renders mid-drag (Run-2).
         self._ext_render_timer = QTimer(self)
         self._ext_render_timer.setSingleShot(True)
@@ -1061,11 +1061,11 @@ class SphereDocker(DockWidget):
         self._ext_render_pending = False
         self._ext_unchanged = 0
         # Render attribution (Q1): trigger/size/cost of the last executed
-        # render, consumed by _rebuild_orb_now for the RENDER_DONE line.
+        # render, consumed by _rebuild_sphere_now for the RENDER_DONE line.
         self._pending_reason = None
         self._last_render_size = -1
         self._last_render_smooth = -1.0
-        # While an external stream is in flight we render the orb like a slider
+        # While an external stream is in flight we render the sphere like a slider
         # drag: smaller grid, blur off, throttled. The end detector restores
         # full quality with a single final render.
         self._external_preview = False
@@ -1211,7 +1211,7 @@ class SphereDocker(DockWidget):
             # First run: harmonize the default trio from the base color
             # instead of three fixed swatches.
             self._distribute_from(QColor(self._targets["base"]))
-        self._rebuild_orb()
+        self._rebuild_sphere()
         LOG.info("SphereDocker.__init__ COMPLETE")
         # Build stamp for bug reports: version + the actual loaded file, so a
         # stale or half-reinstalled copy is visible in the log (Q3).
@@ -1246,7 +1246,7 @@ class SphereDocker(DockWidget):
             if self._original_color is None:
                 return
             self._set_base_color(self._original_color)
-            self._rebuild_orb()
+            self._rebuild_sphere()
             self._sync_sliders_from_state()
             self._update_preview()
         except Exception as exc:  # pragma: no cover - UI only
@@ -1441,21 +1441,21 @@ class SphereDocker(DockWidget):
             # updates the colour chips beside the glyphs, but the header swatch
             # comes from _update_preview and the Hue/Sat/Light positions from
             # _sync_sliders_from_state. Calling only the dots left the panel
-            # showing the previous colour after a pick: the orb went black
+            # showing the previous colour after a pick: the sphere went black
             # while the swatch and sliders still read the old pink. This mirrors
             # _on_target_changed, the other path that replaces all three.
             self._sync_target_dots()
             self._sync_sliders_from_state()
             self._update_preview()
-            # And the orb itself. This was missing, and it is the bug behind
+            # And the sphere itself. This was missing, and it is the bug behind
             # "picking black makes everything go black": the swatch and the
             # sliders updated, but the sphere kept rendering the *previous*
-            # colour, so a pick looked like it had turned the whole orb black.
-            # Measured: sampling the orb after an orange pick showed 3% bright
+            # colour, so a pick looked like it had turned the whole sphere black.
+            # Measured: sampling the sphere after an orange pick showed 3% bright
             # pixels, the same as after a black pick, and 66% once this call
             # was added. Every other path that changes a target ends in
-            # _rebuild_orb for the same reason.
-            self._rebuild_orb()
+            # _rebuild_sphere for the same reason.
+            self._rebuild_sphere()
 
             LOG.info("distributed %s -> base=%s light=%s shadow=%s",
                      color.name(), base.name(), light.name(), shadow.name())
@@ -1640,7 +1640,7 @@ class SphereDocker(DockWidget):
     # UI construction
     # ------------------------------------------------------------------
     def _build_ui(self):
-        """Build the Lighting Orb panel (see issue #9 for the reference layout)."""
+        """Build the Lighting Sphere panel (see issue #9 for the reference layout)."""
 
         class TargetBtn(QPushButton):
             """Small selectable dot: terminator (shadow) / ring (base) / rays (light).
@@ -1841,25 +1841,25 @@ class SphereDocker(DockWidget):
         layout.addSpacing(PANEL_ROW_GAP)
 
         # ------------------------------------------------------------------
-        # Orb + readout
+        # Sphere + readout
         # ------------------------------------------------------------------
-        orb_frame = QFrame()
-        orb_layout = QVBoxLayout(orb_frame)
+        sphere_frame = QFrame()
+        sphere_layout = QVBoxLayout(sphere_frame)
         # Small gap under the gear / swatch / eyedropper row so the light
         # icons are not crowded against the controls above them.
-        orb_layout.setContentsMargins(0, 6, 0, 0)
-        orb_layout.setSpacing(2)
-        self._orb.setFixedSize(ORB_SIZE, ORB_SIZE)
-        # Fixed-size holder so the orb sits at a predictable size.
-        orb_holder = QWidget()
-        orb_holder.setFixedSize(ORB_SIZE, ORB_SIZE)
-        orb_holder.setStyleSheet("background: transparent;")
-        orb_frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        orb_grid = QGridLayout(orb_holder)
-        orb_grid.setContentsMargins(0, 0, 0, 0)
-        orb_grid.addWidget(self._orb, 0, 0)
+        sphere_layout.setContentsMargins(0, 6, 0, 0)
+        sphere_layout.setSpacing(2)
+        self._sphere.setFixedSize(SPHERE_SIZE, SPHERE_SIZE)
+        # Fixed-size holder so the sphere sits at a predictable size.
+        sphere_holder = QWidget()
+        sphere_holder.setFixedSize(SPHERE_SIZE, SPHERE_SIZE)
+        sphere_holder.setStyleSheet("background: transparent;")
+        sphere_frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        sphere_grid = QGridLayout(sphere_holder)
+        sphere_grid.setContentsMargins(0, 0, 0, 0)
+        sphere_grid.addWidget(self._sphere, 0, 0)
 
-        # Presets flank the orb, three per side, instead of sitting in a grid
+        # Presets flank the sphere, three per side, instead of sitting in a grid
         # below it: at panel width a 3x2 grid pushed everything else down, and
         # the sphere is the visual anchor the presets modify, so they belong
         # beside it. Left column holds presets 0-2, right column 3-5.
@@ -1887,24 +1887,24 @@ class SphereDocker(DockWidget):
             return col
 
         # Lamp model sits directly above the sphere as icon buttons, like the
-        # preset cells: it visibly reshapes the orb, so it belongs with it
+        # preset cells: it visibly reshapes the sphere, so it belongs with it
         # rather than buried in Advanced.
-        orb_layout.addWidget(self.light_type_row)
-        orb_layout.addSpacing(6)
-        orb_row = QHBoxLayout()
-        orb_row.setContentsMargins(0, 0, 0, 0)
-        orb_row.setSpacing(2)
-        orb_row.addLayout(_preset_column((0, 1, 2)), 0)
-        orb_row.addWidget(orb_holder, alignment=Qt.AlignCenter)
-        orb_row.addLayout(_preset_column((3, 4, 5)), 0)
-        orb_layout.addLayout(orb_row)
+        sphere_layout.addWidget(self.light_type_row)
+        sphere_layout.addSpacing(6)
+        sphere_row = QHBoxLayout()
+        sphere_row.setContentsMargins(0, 0, 0, 0)
+        sphere_row.setSpacing(2)
+        sphere_row.addLayout(_preset_column((0, 1, 2)), 0)
+        sphere_row.addWidget(sphere_holder, alignment=Qt.AlignCenter)
+        sphere_row.addLayout(_preset_column((3, 4, 5)), 0)
+        sphere_layout.addLayout(sphere_row)
 
         self._readout = QLabel("")
         self._readout.setAlignment(Qt.AlignCenter)
         self._readout.setFixedHeight(14)
         self._readout.setStyleSheet(
             "QLabel { color: %s; font-size: 10px; }" % TEXT_DIM.name())
-        layout.addWidget(orb_frame)
+        layout.addWidget(sphere_frame)
 
         # ------------------------------------------------------------------
         # Target selector
@@ -1942,11 +1942,11 @@ class SphereDocker(DockWidget):
             target_row.addWidget(cell, alignment=Qt.AlignCenter)
             self._target_btns.append(btn)
         target_row.addStretch(1)
-        # Dots live inside the orb frame, tucked under the sphere, with the
+        # Dots live inside the sphere frame, tucked under the sphere, with the
         # hover readout below them.
-        orb_layout.addLayout(target_row)
-        orb_layout.addWidget(self._readout)
-        # Breathing room between the orb frame and the Hue slider.
+        sphere_layout.addLayout(target_row)
+        sphere_layout.addWidget(self._readout)
+        # Breathing room between the sphere frame and the Hue slider.
         layout.addSpacing(6)
 
         # ------------------------------------------------------------------
@@ -1958,7 +1958,7 @@ class SphereDocker(DockWidget):
         layout.addWidget(self.contrast_row)
         layout.addWidget(self.power_row)
 
-        # (Presets now flank the orb above, three per side, instead of a grid
+        # (Presets now flank the sphere above, three per side, instead of a grid
         # here: at panel width the 3x2 grid pushed everything else down, and the
         # sphere is the visual anchor the presets modify.)
 
@@ -1978,8 +1978,8 @@ class SphereDocker(DockWidget):
         # distributed between the controls.
         layout.addStretch(1)
 
-        # The sampler is parented to the panel, not the orb: a child of the orb is
-        # clipped to the orb's bounds, which stopped the reticle reaching the
+        # The sampler is parented to the panel, not the sphere: a child of the sphere is
+        # clipped to the sphere's bounds, which stopped the reticle reaching the
         # rim of the sphere.
         self.cylinder.setParent(main)
 
@@ -2002,7 +2002,7 @@ class SphereDocker(DockWidget):
         self._settings_panel = SettingsPanel(
             azimuth=int(self.processor.engine.light_azimuth),
             elevation=int(round(float(self.processor.engine.light_elevation))),
-            quality=self._orb_render_size,
+            quality=self._sphere_render_size,
             highlight_size=self._shininess_to_size(
                 self.processor.engine.shininess),
             parent=main)
@@ -2017,7 +2017,7 @@ class SphereDocker(DockWidget):
         # Paint the initial state so the swatch / dots / gradients are correct
         # on the very first frame (previously _update_preview only ran on a
         # user action, leaving the swatch an empty grey box).
-        # Restore the user's saved setup before the first paint, so the orb never
+        # Restore the user's saved setup before the first paint, so the sphere never
         # flashes at the defaults on the way to the saved state.
         self._load_settings()
 
@@ -2025,7 +2025,7 @@ class SphereDocker(DockWidget):
         self._sync_sliders_from_state()
         self._update_preview()
 
-        # Drop the orb to a cheaper render size while any slider is being
+        # Drop the sphere to a cheaper render size while any slider is being
         # dragged, and restore full quality on release. Done in one pass over
         # the widget tree rather than per-control so that sliders added later --
         # in the main panel or inside the settings popup -- pick it up for free.
@@ -2293,7 +2293,7 @@ class SphereDocker(DockWidget):
         self._sync_target_dots()
         try:
             base = self._targets["base"]
-            # A colour chosen on the orb (for drawing) takes precedence over the
+            # A colour chosen on the sphere (for drawing) takes precedence over the
             # sphere's base in the active swatch, so picking a colour to paint
             # with does not look like it was discarded.
             shown = self._chosen_color if self._chosen_color is not None else base
@@ -2403,7 +2403,7 @@ class SphereDocker(DockWidget):
             self._distribute_from(color)
             self._sync_target_buttons()
             self._sync_sliders_from_state()
-            self._rebuild_orb()
+            self._rebuild_sphere()
             self._update_preview()
             self._send_to_krita(self._targets["base"])
         except Exception:  # pragma: no cover - UI only
@@ -2510,8 +2510,8 @@ class SphereDocker(DockWidget):
         try:
             self.processor.set_light_angle(
                 int(state["azimuth"]), float(state["elevation"]))
-            self._orb_render_size = int(state["quality"])
-            self._orb.set_show_pointer(bool(state["pointer"]))
+            self._sphere_render_size = int(state["quality"])
+            self._sphere.set_show_pointer(bool(state["pointer"]))
             self._set_hex_visible(bool(state.get("hex", True)))
             # Highlight size drives the same shininess as the Advanced
             # "Specular" row. The row is synced to match, so the two controls
@@ -2520,7 +2520,7 @@ class SphereDocker(DockWidget):
                 self.processor.set_shininess(
                     self._size_to_shininess(int(state["highlight_size"])))
                 self.specular_row.set_value(int(self.processor.engine.shininess))
-            self._rebuild_orb()
+            self._rebuild_sphere()
         except Exception as exc:  # pragma: no cover - UI only
             LOG.exception("_on_settings_changed failed")
             print(f"Lumina: settings change failed - {exc}")
@@ -2555,8 +2555,8 @@ class SphereDocker(DockWidget):
             "azimuth": int(eng.light_azimuth),
             "elevation": int(round(float(eng.light_elevation))),
             "highlight_size": self._shininess_to_size(eng.shininess),
-            "quality": int(getattr(self, "_orb_render_size", ORB_RENDER)),
-            "sampler": bool(self._orb._show_pointer),
+            "quality": int(getattr(self, "_sphere_render_size", SPHERE_RENDER)),
+            "sampler": bool(self._sphere._show_pointer),
             "show_hex": bool(getattr(self, "_show_hex", True)),
             "hex_locked": bool(getattr(self, "_hex_locked", True)),
             "diffuse": self._knee_to_level(eng.spec_knee),
@@ -2632,8 +2632,8 @@ class SphereDocker(DockWidget):
                             self._targets[name] = qc
                 eng.set_light_angle(int(num("azimuth", 287, 0, 359)),
                                     num("elevation", 45, 0, 90))
-                self._orb_render_size = int(num("quality", ORB_RENDER, 64, 512))
-                self._orb.set_show_pointer(str(s.value("sampler", "true")).lower()
+                self._sphere_render_size = int(num("quality", SPHERE_RENDER, 64, 512))
+                self._sphere.set_show_pointer(str(s.value("sampler", "true")).lower()
                                            not in ("false", "0"))
                 self._set_hex_visible(str(s.value("show_hex", "true")).lower()
                                       not in ("false", "0"))
@@ -2713,8 +2713,8 @@ class SphereDocker(DockWidget):
             finally:
                 self._syncing = False
             # First paint happens after the guard is released, so this rebuild
-            # both shows the restored orb and commits it as the new saved state.
-            self._rebuild_orb()
+            # both shows the restored sphere and commits it as the new saved state.
+            self._rebuild_sphere()
             LOG.info("settings restored")
         except Exception as exc:  # pragma: no cover - startup path
             LOG.exception("_load_settings failed")
@@ -2734,8 +2734,8 @@ class SphereDocker(DockWidget):
                 int(eng.light_azimuth),
                 int(round(float(eng.light_elevation))),
                 self._shininess_to_size(eng.shininess),
-                int(getattr(self, "_orb_render_size", ORB_RENDER)),
-                bool(self._orb._show_pointer),
+                int(getattr(self, "_sphere_render_size", SPHERE_RENDER)),
+                bool(self._sphere._show_pointer),
                 bool(getattr(self, "_show_hex", True)),
             )
         except Exception as exc:  # pragma: no cover - cosmetic only
@@ -2783,8 +2783,8 @@ class SphereDocker(DockWidget):
                 eng.set_ground_bounce(0.02)
                 eng.set_brightness(1.0)
                 eng.set_saturation(1.0)
-                self._orb_render_size = ORB_RENDER
-                self._orb.set_show_pointer(True)
+                self._sphere_render_size = SPHERE_RENDER
+                self._sphere.set_show_pointer(True)
                 # The base was assigned directly above, so anchor the relative
                 # scaler before moving the row: set_value(100) must be a no-op
                 # (100/100), not a 100/last rescale of the fresh default.
@@ -2825,7 +2825,7 @@ class SphereDocker(DockWidget):
             self._sync_sliders_from_state()
             # Rebuilds and persists, since a reset is a change that must stick.
             # Explicit action: save now rather than waiting out the debounce.
-            self._rebuild_orb()
+            self._rebuild_sphere()
             self._save_settings()
             self._update_preview()
             LOG.info("settings reset to defaults")
@@ -2841,7 +2841,7 @@ class SphereDocker(DockWidget):
             rgb = self._current_krita_rgb()
             if rgb is not None:
                 self._set_base_color(QColor(*rgb))
-            self._rebuild_orb()
+            self._rebuild_sphere()
             self._update_preview()
         except Exception as exc:  # pragma: no cover - UI only
             print(f"Lumina: on_refresh failed - {exc}")
@@ -2890,7 +2890,7 @@ class SphereDocker(DockWidget):
                 return
             LOG.info("_on_hue_changed value=%d target=%s", value, self._active_target)
             self._set_active_hsv(h=value / 359.0)
-            self._rebuild_orb()
+            self._rebuild_sphere()
             self._update_preview()
             self._sync_gradient_tracks()
         except Exception as exc:
@@ -2902,7 +2902,7 @@ class SphereDocker(DockWidget):
                 return
             LOG.info("_on_saturation_changed value=%d target=%s", value, self._active_target)
             self._set_active_hsv(s=value / 100.0)
-            self._rebuild_orb()
+            self._rebuild_sphere()
             self._update_preview()
             self._sync_gradient_tracks()
         except Exception as exc:
@@ -2914,7 +2914,7 @@ class SphereDocker(DockWidget):
                 return
             LOG.info("_on_light_changed value=%d target=%s", value, self._active_target)
             self._set_active_hsv(v=value / 100.0)
-            self._rebuild_orb()
+            self._rebuild_sphere()
             self._update_preview()
             self._sync_gradient_tracks()
         except Exception as exc:
@@ -2923,7 +2923,7 @@ class SphereDocker(DockWidget):
     # ------------------------------------------------------------------
     # Rendering
     # ------------------------------------------------------------------
-    def _render_orb(self) -> QImage:
+    def _render_sphere(self) -> QImage:
         """Render the sphere from the three target colors.
 
         The engine takes the base color as the albedo and the shadow tint as an
@@ -2936,14 +2936,14 @@ class SphereDocker(DockWidget):
         for 128px, 35.6 ms for 200px and 76.0 ms for 288px -- so a full-quality
         render holds the event loop long enough to stall the slider handle
         itself, which is what made the controls feel like they were moving in
-        slow motion. Capping the drag puts the loop at ~64 Hz, and the orb is
+        slow motion. Capping the drag puts the loop at ~64 Hz, and the sphere is
         re-rendered at full size the moment the drag ends.
         """
         light = self._targets["light"]
         shadow = self._targets["shadow"]
         self.processor.set_light_color(self._rgb01(light))
         self.processor.set_shadow_color(self._rgb01(shadow))
-        size = int(getattr(self, "_orb_render_size", ORB_RENDER))
+        size = int(getattr(self, "_sphere_render_size", SPHERE_RENDER))
         if getattr(self, "_slider_dragging", False) and size > DRAG_RENDER:
             size = DRAG_RENDER
         if getattr(self, "_external_preview", False) and size > DRAG_RENDER:
@@ -2971,19 +2971,19 @@ class SphereDocker(DockWidget):
         """Restore full render quality once the drag is over.
 
         The value is already final by the time this fires, so scheduling a
-        normal rebuild here produces the crisp orb the user is left looking at.
+        normal rebuild here produces the crisp sphere the user is left looking at.
 
         Note this flag is deliberately *not* the same as ``_dragging``, which
         tracks the floating title bar; sharing the name would let a title-bar
-        drag drop the orb to the drag resolution, and a slider release would
+        drag drop the sphere to the drag resolution, and a slider release would
         cancel an in-progress window drag.
         """
         self._slider_dragging = False
         self.processor.set_smooth(getattr(self, "_smooth_saved", 2.0))
-        self._rebuild_orb(reason="slider_release")
+        self._rebuild_sphere(reason="slider_release")
 
-    def _rebuild_orb(self, reason: str = "live_update"):
-        """Schedule a coalesced orb rebuild and mark settings dirty.
+    def _rebuild_sphere(self, reason: str = "live_update"):
+        """Schedule a coalesced sphere rebuild and mark settings dirty.
 
         ``reason`` names the requester for the RENDER_DONE log line
         (``slider_release`` / ``external_final`` / ``live_update``), so a UI
@@ -3066,8 +3066,8 @@ class SphereDocker(DockWidget):
         except Exception:  # pragma: no cover - disk/IO only
             LOG.exception("_flush_settings failed")
 
-    def _rebuild_orb_now(self):
-        """Render and display the orb immediately (bypasses the coalescer).
+    def _rebuild_sphere_now(self):
+        """Render and display the sphere immediately (bypasses the coalescer).
 
         While dragging, renders are throttled to ~30ms so the handle tracks
         the pointer; the release always schedules a full-quality final.
@@ -3075,16 +3075,16 @@ class SphereDocker(DockWidget):
         if getattr(self, "_slider_dragging", False) or \
                 getattr(self, "_external_preview", False):
             now = time.monotonic()
-            last = getattr(self, "_last_orb_ms", 0.0)
+            last = getattr(self, "_last_sphere_ms", 0.0)
             gap_ms = (now - last) * 1000.0
             if gap_ms < DRAG_THROTTLE_MS:
                 QTimer.singleShot(
                     max(1, int(DRAG_THROTTLE_MS - gap_ms)),
-                    self._rebuild_orb_now)
+                    self._rebuild_sphere_now)
                 return
-            self._last_orb_ms = now
+            self._last_sphere_ms = now
         started = time.monotonic()
-        self._orb.set_image(self._render_orb())
+        self._sphere.set_image(self._render_sphere())
         render_ms = (time.monotonic() - started) * 1000.0
         # Attribution line (Q1): every executed render reports its trigger,
         # resolution and cost, so a freeze maps to the render that caused it.
@@ -3156,7 +3156,7 @@ class SphereDocker(DockWidget):
                     self._clamp01(base.blueF() * scale),
                 ))
                 self._base_level_last = value
-            self._rebuild_orb()
+            self._rebuild_sphere()
             self._sync_sliders_from_state()
             self._update_preview()
         except Exception as exc:
@@ -3167,7 +3167,7 @@ class SphereDocker(DockWidget):
         try:
             LOG.info("_on_mixer_changed mode=%s", mode)
             self.processor.set_mixer_mode(mode)
-            self._rebuild_orb()
+            self._rebuild_sphere()
         except Exception as exc:
             LOG.exception("_on_mixer_changed failed")
 
@@ -3176,7 +3176,7 @@ class SphereDocker(DockWidget):
         try:
             LOG.info("_on_light_type_changed mode=%s", mode)
             self.processor.set_light_type(mode)
-            self._rebuild_orb()
+            self._rebuild_sphere()
         except Exception as exc:
             LOG.exception("_on_light_type_changed failed")
 
@@ -3185,7 +3185,7 @@ class SphereDocker(DockWidget):
         try:
             LOG.info("_on_tone_changed value=%d", value)
             self.processor.set_saturation(value / 100.0)
-            self._rebuild_orb()
+            self._rebuild_sphere()
         except Exception as exc:
             LOG.exception("_on_tone_changed failed")
 
@@ -3200,7 +3200,7 @@ class SphereDocker(DockWidget):
                         row.set_value(percent)
                     finally:
                         row.slider.blockSignals(False)
-            self._rebuild_orb()
+            self._rebuild_sphere()
         except Exception as exc:  # pragma: no cover - UI only
             LOG.exception("_set_light_power failed")
             print(f"Lumina: set light power failed - {exc}")
@@ -3223,7 +3223,7 @@ class SphereDocker(DockWidget):
         try:
             LOG.info(f"_on_ambient_changed value={value}")
             self.processor.set_ambient(value / 100.0)
-            self._rebuild_orb()
+            self._rebuild_sphere()
         except Exception as exc:
             LOG.exception("_on_ambient_changed failed")
 
@@ -3231,7 +3231,7 @@ class SphereDocker(DockWidget):
         try:
             LOG.info(f"_on_contrast_changed value={value}")
             self.processor.set_contrast(value / 100.0)
-            self._rebuild_orb()
+            self._rebuild_sphere()
         except Exception as exc:
             LOG.exception("_on_contrast_changed failed")
 
@@ -3239,7 +3239,7 @@ class SphereDocker(DockWidget):
         try:
             LOG.info(f"_on_specular_changed value={value}")
             self.processor.set_shininess(value)
-            self._rebuild_orb()
+            self._rebuild_sphere()
         except Exception as exc:
             LOG.exception("_on_specular_changed failed")
 
@@ -3247,7 +3247,7 @@ class SphereDocker(DockWidget):
         try:
             LOG.info(f"_on_diffuse_changed value={value}")
             self.processor.set_spec_knee(self._level_to_knee(value))
-            self._rebuild_orb()
+            self._rebuild_sphere()
         except Exception as exc:
             LOG.exception("_on_diffuse_changed failed")
 
@@ -3308,7 +3308,7 @@ class SphereDocker(DockWidget):
         try:
             LOG.info(f"_on_glow_changed value={value}")
             self.processor.set_glow_intensity(value / 100.0)
-            self._rebuild_orb()
+            self._rebuild_sphere()
         except Exception as exc:
             LOG.exception("_on_glow_changed failed")
 
@@ -3316,28 +3316,28 @@ class SphereDocker(DockWidget):
         try:
             self.processor.set_rim_light(value / 100.0)
             self._sync_rim_interlock()
-            self._rebuild_orb()
+            self._rebuild_sphere()
         except Exception as exc:
             LOG.exception("_on_rim_changed failed")
 
     def _on_rim_mix_changed(self, value):
         try:
             self.processor.set_rim_sky_mix(value / 100.0)
-            self._rebuild_orb()
+            self._rebuild_sphere()
         except Exception as exc:
             LOG.exception("_on_rim_mix_changed failed")
 
     def _on_sky_changed(self, value):
         try:
             self.processor.set_sky_bounce(value / 100.0)
-            self._rebuild_orb()
+            self._rebuild_sphere()
         except Exception as exc:
             LOG.exception("_on_sky_changed failed")
 
     def _on_ground_changed(self, value):
         try:
             self.processor.set_ground_bounce(value / 100.0)
-            self._rebuild_orb()
+            self._rebuild_sphere()
         except Exception as exc:
             LOG.exception("_on_ground_changed failed")
 
@@ -3366,13 +3366,13 @@ class SphereDocker(DockWidget):
             for btn in self._preset_btns:
                 btn.setChecked(btn.key == key)
             # The guard has to stay raised across the *final* rebuild too. Every
-            # row update below fires valueChanged -> _rebuild_orb, and if the
+            # row update below fires valueChanged -> _rebuild_sphere, and if the
             # flag were already clear that rebuild would uncheck the very
             # button the user just pressed.
             self._applying_preset = True
             try:
                 self._apply_preset_values(preset["values"])
-                self._rebuild_orb()
+                self._rebuild_sphere()
                 # Explicit action: save now rather than waiting out the debounce.
                 self._save_settings()
             finally:
@@ -3445,7 +3445,7 @@ class SphereDocker(DockWidget):
     def canvasChanged(self, canvas):
         """Called by Krita when the active canvas/document changes.
 
-        Refreshes the orb from current state so switching documents keeps it in sync.
+        Refreshes the sphere from current state so switching documents keeps it in sync.
         The real external-color listener is the View color-change signal wired below;
         this covers document/canvas switches where no change signal fires per pick.
         """
@@ -3515,7 +3515,7 @@ class SphereDocker(DockWidget):
         return None
 
     def _on_krita_color_changed(self, *args):
-        """Mirror an external color change into the orb. NEVER re-send to Krita (avoids a loop)."""
+        """Mirror an external color change into the sphere. NEVER re-send to Krita (avoids a loop)."""
         try:
             if getattr(self, "_sync_guard", False):
                 # This change is the echo of our own _send_to_krita() call.
@@ -3655,7 +3655,7 @@ class SphereDocker(DockWidget):
                 # _sync_sliders_from_state; the effects its row handlers would
                 # have had are replayed once, here, after the sync.
                 self._sync_sliders_from_state()
-                self._rebuild_orb()
+                self._rebuild_sphere()
                 self._update_preview()
         except Exception:  # pragma: no cover - Krita-only path
             LOG.exception("_apply_external_color failed")
@@ -3705,11 +3705,11 @@ class SphereDocker(DockWidget):
                 self._ext_render_pending = True
                 self._apply_external_color()
             # Always schedule one final: if the last throttle tick already
-            # applied this color, the orb is still sitting on the 96px blurred
+            # applied this color, the sphere is still sitting on the 96px blurred
             # preview and the full-quality image still has to be produced.
-            # Flagged so _rebuild_orb_now logs it standalone as EXT_FINAL.
+            # Flagged so _rebuild_sphere_now logs it standalone as EXT_FINAL.
             self._ext_final_pending = True
-            self._rebuild_orb(reason="external_final")
+            self._rebuild_sphere(reason="external_final")
             avg, p95, peak = self._render_stats(
                 getattr(self, "_ext_render_samples", None) or [])
             LOG.info("EXT_SUMMARY applies=%d renders=%d avg_ms=%.1f p95_ms=%.1f max_ms=%.1f (final)",
@@ -3863,7 +3863,7 @@ class SphereDocker(DockWidget):
                 # light or shadow target was the one being picked.
                 self._sync_guard = True
                 view.setForeGroundColor(managed)
-                # Choosing a colour on the orb writes the foreground, and the
+                # Choosing a colour on the sphere writes the foreground, and the
                 # watcher would otherwise read that back as a canvas sample and
                 # re-derive base/light/shadow from a mere click. Baseline it on
                 # what Krita actually *stored* rather than on the value we sent:
@@ -3878,31 +3878,31 @@ class SphereDocker(DockWidget):
     def _clear_sync_guard(self) -> None:
         self._sync_guard = False
 
-    # NOTE: the orb NEVER assigns colours to its own targets. Clicking or
+    # NOTE: the sphere NEVER assigns colours to its own targets. Clicking or
     # dragging it only chooses a colour for drawing (Krita's foreground).
     # The sphere's base/light/shadow are changed by the sliders, the target
     # dots, or the eyedropper tool -- nothing else.
-    # Clicking or dragging the orb only drives the brush (Krita foreground) and
+    # Clicking or dragging the sphere only drives the brush (Krita foreground) and
     # the hover preview. The sphere's colors change from the sliders, the target
-    # dots, or the document eyedropper -- never from clicking the orb, which used
+    # dots, or the document eyedropper -- never from clicking the sphere, which used
     # to re-render the sphere mid-drag and run the picked color away.
 
-    def _on_orb_brush(self, color):
+    def _on_sphere_brush(self, color):
         """Choose a colour to draw with.
 
         Fires on press and on every move during a drag. The colour is sent to
         Krita's foreground and kept in the right (active) swatch so it survives
-        leaving the orb. The sphere's own target colours are never touched.
+        leaving the sphere. The sphere's own target colours are never touched.
         """
         try:
             self._chosen_color = QColor(color)
             self._set_swatch_color(self._sw_current, color)
             self._send_to_krita(color)
         except Exception as exc:  # pragma: no cover - Krita-only path
-            LOG.exception("_on_orb_brush failed")
+            LOG.exception("_on_sphere_brush failed")
 
-    def _on_orb_hover(self, color):
-        """Show the RGB readout and sampling ring while over the orb.
+    def _on_sphere_hover(self, color):
+        """Show the RGB readout and sampling ring while over the sphere.
 
         The right (active) swatch previews the colour under the pointer. When the
         pointer leaves it falls back to the colour the user last *chose* by
@@ -3920,7 +3920,7 @@ class SphereDocker(DockWidget):
                 self.cylinder.set_color(color)
                 self._set_swatch_color(self._sw_current, color)
         except Exception as exc:  # pragma: no cover - cosmetic only
-            LOG.exception("_on_orb_hover failed")
+            LOG.exception("_on_sphere_hover failed")
 
     @staticmethod
     def _set_swatch_color(swatch, color: QColor) -> None:
@@ -4019,7 +4019,7 @@ class SphereDocker(DockWidget):
     # It exists because ``View.foregroundColorChanged`` is exposed on Krita 5.x
     # but never actually emitted, so _watch_krita_colors connects signals that
     # never fire. Polling is the only thing that makes external colour picks
-    # reach the orb. The native C++ KisCanvasResourceProvider::sigFGColorChanged
+    # reach the sphere. The native C++ KisCanvasResourceProvider::sigFGColorChanged
     # exists but is not exposed through the public Python API, so no private
     # bridge -- just a fast poll. Each tick's read cost is self-measured (see
     # POLL_COST in the log); 50 ms keeps detection at the render throttle rate.
@@ -4092,7 +4092,7 @@ class SphereDocker(DockWidget):
             color = QColor(*rgb)
             LOG.info("eyedropper sampled %s", color.name())
             self._distribute_from(color)
-            self._rebuild_orb()
+            self._rebuild_sphere()
             self._sync_sliders_from_state()
             self._update_preview()
         except Exception as exc:  # pragma: no cover - UI only

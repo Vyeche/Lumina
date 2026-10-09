@@ -102,7 +102,7 @@ and writes the result.
 
 Two related defects on the silhouette.
 
-**Symptom:** the orb's edge was visibly choppy, and colours right at the rim were
+**Symptom:** the sphere's edge was visibly choppy, and colours right at the rim were
 effectively unpickable.
 
 **1. The edge had no antialiasing at all.** `render_image` wrote a binary alpha
@@ -130,14 +130,14 @@ large arc, so the terminator was practically unreachable.
 (`EDGE_GLIDE`, 6px) now projects the point radially back onto the silhouette,
 so dragging past the edge glides the sample around the rim.
 
-This needed a second fix to actually work: the orb was drawn to fill its
+This needed a second fix to actually work: the sphere was drawn to fill its
 widget edge-to-edge, so the widget bounds rejected the point *before* the glide
 band was ever reached — at the four points where circle and square touch, and
-nowhere else. The orb is inset by `ORB_MARGIN` (8px) to give the band room.
-Drawing and picking now both read a single `_orb_geometry()` helper, since they
+nowhere else. The sphere is inset by `SPHERE_MARGIN` (8px) to give the band room.
+Drawing and picking now both read a single `_sphere_geometry()` helper, since they
 previously recomputed the centring separately and could drift apart.
 
-Also set `QPainter.SmoothPixmapTransform` in `paintEvent`: the orb is drawn at
+Also set `QPainter.SmoothPixmapTransform` in `paintEvent`: the sphere is drawn at
 whatever resolution it was rendered, and the drag path renders at 128px and
 upscales into a 200px widget, which was blocky.
 
@@ -155,9 +155,9 @@ handle lagged the cursor.
 per-update cost: 15.6 ms at 128px, 35.6 ms at 200px, **76.0 ms at 288px** (the
 *High* preset) — 13 Hz. The existing 0 ms coalescer cannot help, because a
 blocking 76 ms render stalls the event loop itself, so the *handle* falls behind
-rather than just the orb.
+rather than just the sphere.
 
-**Fix:** while any slider is held, the orb renders at 128px; full quality is
+**Fix:** while any slider is held, the sphere renders at 128px; full quality is
 restored on release. `ColorSlider` gained `beganDrag` / `endedDrag` signals, and
 the docker wires all 12 sliders in a single `findChildren` pass so a slider
 added later — in the main panel or the settings popup — is covered for free.
@@ -165,7 +165,7 @@ added later — in the main panel or the settings popup — is covered for free.
 
 Note the flag is deliberately *not* `_dragging`: that name already tracked the
 floating title bar's window drag. Sharing it would let a title-bar drag drop the
-orb to 128px, and a slider release would cancel an in-progress window drag.
+sphere to 128px, and a slider release would cancel an in-progress window drag.
 
 ### "Show color sampler" toggle did nothing (fixed 2026-09-29)
 
@@ -173,11 +173,11 @@ orb to 128px, and a slider release would cancel an in-progress window drag.
 > is quoted as it was originally reported.
 
 **Symptom:** unchecking *Show color sampler* in the gear popup left the ring
-following the cursor on the orb. The toggle appeared completely inert.
+following the cursor on the sphere. The toggle appeared completely inert.
 
 **Two independent defects, both required for the symptom:**
 
-1. **It gated the wrong marker.** The orb draws *two* separate markers, and the
+1. **It gated the wrong marker.** The sphere draws *two* separate markers, and the
    flag only covered the smaller one:
 
    | Marker | Drawn by | Gated by `_show_pointer`? |
@@ -194,14 +194,14 @@ following the cursor on the orb. The toggle appeared completely inert.
 
 **Fix** (`sphere_widget.py`):
 - `set_show_pointer` now also hides the sampling ring immediately when switched
-  off. Without this the ring lingered until the pointer next left the orb,
+  off. Without this the ring lingered until the pointer next left the sphere,
   which itself reads as the toggle having failed.
 - `_reposition_preview` returns early and hides the ring when `_show_pointer` is
   false, so a subsequent pointer move cannot resurrect it.
 
 **Verify (offscreen, 2026-09-29):** toggling off while hovering hides the ring
 immediately; it stays hidden across repeated pointer moves and fresh hover
-events; toggling back on restores it; and leaving the orb still hides it. 7/7
+events; toggling back on restores it; and leaving the sphere still hides it. 7/7
 checks pass. `test_shading_standalone.py` and `test_shading.py` unaffected.
 
 ### Section controls never render (fixed 2026-09-15)
@@ -243,7 +243,7 @@ Traceback (most recent call last):
            ~~~~~~~~~~^^
 
   File "$HOME/.var/app/org.kde.krita/data/krita/pykrita/LuminaPlugin/sphere_docker.py", line 157, in __init__
-    self._orb = SphereWidget()
+    self._sphere = SphereWidget()
                 ~~~~~~~~~~~~^^
 
   File "$HOME/.var/app/org.kde.krita/data/krita/pykrita/LuminaPlugin/sphere_widget.py", line 32, in __init__

@@ -370,7 +370,7 @@ class ColorSlider(QSlider):
 # CollapsibleSection — disclosure group for the advanced controls
 # ---------------------------------------------------------------------------
 class ColorSampler(QWidget):
-    """A colour sampling reticle drawn on top of the orb.
+    """A colour sampling reticle drawn on top of the sphere.
 
     This is a live-drawn object, not a static icon: a circular bezel centred on
     the pointer whose inner fill always shows the exact colour of the pixel
@@ -390,7 +390,7 @@ class ColorSampler(QWidget):
         self._color = QColor(200, 60, 60)
         self._active = False          # True while the pointer is held down
         self.setFixedSize(56, 56)
-        # Never intercept input: the orb underneath must keep getting the events.
+        # Never intercept input: the sphere underneath must keep getting the events.
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
     def set_color(self, color: Optional[QColor]) -> None:
@@ -449,9 +449,9 @@ class SettingsPanel(QWidget):
     * **Main light direction** - azimuth and elevation. The engine has always
       supported these but no control ever exposed them, so the light could not
       be moved without editing code.
-    * **Render quality** - the orb is shaded in pure Python, so the grid
+    * **Render quality** - the sphere is shaded in pure Python, so the grid
       resolution trades smoothness against fidelity while dragging.
-    * **Picker pointer** - show/hide the sampling ring on the orb.
+    * **Picker pointer** - show/hide the sampling ring on the sphere.
     * **Hex values** - show/hide the copyable hex labels under the swatches.
     * **Reset** - restore every target and lighting parameter to its default.
     """
@@ -489,7 +489,7 @@ class SettingsPanel(QWidget):
         self.highlight_size = self._add_slider(root, "Highlight size",
                                                 0, 100, highlight_size,
                                                 unit="none")
-        set_tooltip(self.highlight_size, "Highlight size on the orb")
+        set_tooltip(self.highlight_size, "Highlight size on the sphere")
 
         qrow = QHBoxLayout()
         qrow.setSpacing(4)
