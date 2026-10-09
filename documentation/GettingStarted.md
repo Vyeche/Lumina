@@ -60,7 +60,7 @@ bottom:
 
 | Row | What it is |
 |---|---|
-| Header | Gear (settings), the **original** and **active** color blocks, eyedropper. |
+| Header | Gear (settings), the **original** and **active** color blocks, eyedropper — with copyable **hex values** under the blocks and an **EDIT** toggle for typing new ones. |
 | Lamp icons | **Point** / **Sun** / **Spot** / **Area** above the sphere. |
 | The orb | The shaded preview. Drag across it to sample a colour. |
 | Target dots + swatches | **Shadow**, **Base** and **Light** selectors; the active target's swatch grows with a white rim. |
@@ -69,8 +69,15 @@ bottom:
 | Presets | Six one-click looks, three per side of the orb. |
 | Advanced | The remaining lighting sliders and settings. |
 
-Every slider shows its value at the right end — click it to type a number
-(`86%` for percent-of-range, otherwise the raw value).
+Every slider shows its value at the right end — click the value to type a
+number (`86` and `86%` both work on percent rows, `86`/`86°`/`86deg` on
+angle rows; Enter commits, clicking away reverts). Clicking a slider's
+track jumps the knob to the click; grabbing the knob drags relatively.
+
+Under each color block sits its **hex value** — click to copy. The **EDIT**
+toggle next to the active hash unlocks typing: type a new hex into the
+active box and press Enter, and the full lighting set is derived from it
+(eyedropper-style). The previous box stays display-only.
 
 The **Use base color as brush** button lives in the gear **Settings** popup:
 it sends the base colour to Krita's foreground. Slider edits never touch the
@@ -139,8 +146,8 @@ bottom of the panel sends the base colour across without a drag.
 
 ## 8. Settings
 
-The **gear** opens light direction, render quality, the sampler toggle and
-**Save settings**. Your setup is saved as you work and restored next time
+The **gear** opens light direction, render quality, the sampler and hex-value
+toggles, and **Save settings**. Your setup is saved as you work and restored next time
 Krita opens, so you never lose a lighting set to a crash or a forced quit.
 
 ## Where to next
