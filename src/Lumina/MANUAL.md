@@ -56,7 +56,7 @@ press Enter — the full lighting set is derived from it, like eyedropping.
 The previous box is display plus copy only. The
 lock state is saved with your settings.
 
-### The orb
+### The Sphere
 
 A sphere lit by the three target colors. **Drag the color sampler** — the small
 ring that follows your pointer — to read the color under it; its centre always
