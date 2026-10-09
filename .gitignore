@@ -37,3 +37,6 @@ lumina_log.txt
 # written here and posted by hand; a half-finished draft in the public repo
 # could be read out of context or posted by someone else.
 documentation/announcements/
+
+# Private reference tester (our calibration file, never publish).
+Sphere UI and Color Rim Shadow Highlight Ref Tester.kra
