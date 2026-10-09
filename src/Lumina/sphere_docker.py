@@ -102,6 +102,10 @@ EXT_END_POLLS = 8
 STREAM_END_SAVE_MS = 500
 # Disk persistence: ordinary changes wait this long of quiet for one write.
 SAVE_DEBOUNCE_MS = 2000
+# Plugin version, logged at startup with the loaded module path so stale or
+# half-reinstalled copies are visible in bug reports. Keep in sync with
+# src/Lumina.desktop (X-KDE-PluginInfo-Version); bump both per release.
+PLUGIN_VERSION = "2.6.0"
 # Settings schema version. v1 stored Tone as brightness (bug); v2 stores Tone
 # as saturation. v3 persists spec_max. v4 migrates Diffuse/highlight-size
 # slider levels to the perceptual curves (old linear positions reinterpreted
@@ -239,6 +243,29 @@ AMBIENT_HUE = (KEY_LIGHT_HUE + 0.5) % 1.0  # its complement, ~209 degrees (cool)
 HIGHLIGHT_HUE_SHIFT = 0.10              # fraction of the way to the key light
 SHADOW_HUE_SHIFT = 0.07                 # rotation deeper into red
 HUE_SHIFT_CAP = 0.07                    # never rotate more than ~25 degrees
+
+# Magenta-zone styling (reference triple #743356 -> #2b0850 / #c25f42).
+# The base rule above is deliberately timid everywhere so primaries keep
+# sane highlights (a fixed -58/+46 offset puts a red highlight on blue).
+# Near magenta it is too timid: the reference wants a violet shadow and a
+# terracotta light, far beyond the caps. So an extra derivation rides on a
+# cos^2 bump centred at 345 deg with ASYMMETRIC support (-65 deg toward
+# blue, +12 deg toward yellow): full strength at the reference hue, fading
+# before orange AND before pure red, so warm bases keep their own shadows
+# instead of inheriting purple ones (red at 15 deg off-centre scores
+# exactly 0). Green/blue/grey render pixel-identically to before, and the
+# bump is zero-slope at both zone edges so no new gradient stop appears
+# where the styling fades out. Every extra term is also gated on
+# saturation, so greys and blacks are untouched.
+MAGENTA_ZONE_CENTER = 345.0 / 360.0
+MAGENTA_ZONE_MINUS_DEG = 65.0
+MAGENTA_ZONE_PLUS_DEG = 12.0
+MAGENTA_LIGHT_FRAC = 0.832             # extra fraction toward the key light
+MAGENTA_SHADOW_SHIFT = 39.7 / 360.0     # extra rotation, deeper into violet
+MAGENTA_LIGHT_SAT = 0.556               # added to the 0.72 desaturation
+MAGENTA_SHADOW_SAT = 0.822              # added to the 0.92 muting
+MAGENTA_TINT = 0.145                    # added to the 45% lift toward white
+MAGENTA_SHADOW_V = 0.23                # added to the 50% shadow multiplier
 
 # Floors for deriving light and shadow from a very dark base. Without these the
 # derivation is pure multiplication, and at v = 0 there is nothing left to
@@ -979,6 +1006,8 @@ class SphereDocker(DockWidget):
         self._settings_restored = False  # set when _load_settings finds saved state
         self._sync_guard = False       # blocks our own foreground echo
         self._awaiting_sampler = False # next canvas sample comes from the eyedropper
+        # Hex labels under the swatches: persisted display setting, on default.
+        self._show_hex = True
         # Slider value that produced the current base color. The Base Level
         # row scales *relatively* (new/old), so this is the anchor that makes
         # a 100->70 drag telescope to exactly x0.70.
@@ -1031,6 +1060,11 @@ class SphereDocker(DockWidget):
         self._last_applied_external = None
         self._ext_render_pending = False
         self._ext_unchanged = 0
+        # Render attribution (Q1): trigger/size/cost of the last executed
+        # render, consumed by _rebuild_orb_now for the RENDER_DONE line.
+        self._pending_reason = None
+        self._last_render_size = -1
+        self._last_render_smooth = -1.0
         # While an external stream is in flight we render the orb like a slider
         # drag: smaller grid, blur off, throttled. The end detector restores
         # full quality with a single final render.
@@ -1179,6 +1213,13 @@ class SphereDocker(DockWidget):
             self._distribute_from(QColor(self._targets["base"]))
         self._rebuild_orb()
         LOG.info("SphereDocker.__init__ COMPLETE")
+        # Build stamp for bug reports: version + the actual loaded file, so a
+        # stale or half-reinstalled copy is visible in the log (Q3).
+        try:
+            LOG.info("Lumina plugin version=%s module=%s",
+                     PLUGIN_VERSION, os.path.abspath(__file__))
+        except Exception:  # pragma: no cover - UI only
+            pass
 
     # ------------------------------------------------------------------
     # Target color state
@@ -1274,9 +1315,14 @@ class SphereDocker(DockWidget):
             # distributed from so the sliders have something real to show
             # instead of the previous pick's hue.
             self._picked_hue = h if h >= 0.0 else 0.0
+            # Magenta-zone extras: scaled by weight x saturation gate, so they
+            # vanish outside the zone and on greys/blacks alike.
+            zw = self._magenta_weight(max(0.0, h)) * sat_gate
             light_h = self._hue_toward(
-                h, KEY_LIGHT_HUE, min(HIGHLIGHT_HUE_SHIFT * sat_gate, cap))
-            shadow_h = (h - min(SHADOW_HUE_SHIFT * sat_gate, cap)) % 1.0
+                h, KEY_LIGHT_HUE, min(HIGHLIGHT_HUE_SHIFT * sat_gate, cap)
+                + zw * MAGENTA_LIGHT_FRAC)
+            shadow_h = (h - min(SHADOW_HUE_SHIFT * sat_gate, cap)
+                        - zw * MAGENTA_SHADOW_SHIFT) % 1.0
             # A base at or near black has no headroom to derive from: s = 0 and
             # v = 0, so proportional scaling collapses light onto a neutral grey
             # and shadow exactly onto the base, leaving the sphere unlit. There
@@ -1344,7 +1390,8 @@ class SphereDocker(DockWidget):
             # not black, which put a mid-grey highlight under a pure black pick
             # and left the Light slider reading 45 for a colour with no lightness
             # in it. A tint of black is black, so the highlight is black too.
-            deriv_v_light = 0.0 if v <= 0.0 else v + (1.0 - v) * 0.45
+            deriv_v_light = 0.0 if v <= 0.0 else \
+                v + (1.0 - v) * (0.45 + zw * MAGENTA_TINT)
             # A shadow has to be *darker than the base*; the floor is only
             # there to keep it from collapsing to black, so it can never lift
             # the shadow above the base it came from. Written as
@@ -1353,13 +1400,14 @@ class SphereDocker(DockWidget):
             # lighter than the base). Clamping to just under the base keeps
             # both properties: always darker, and never pure black.
             shadow_cap = min(_DARK_FLOOR_SHADOW, v * 0.90)
-            deriv_v_shadow = max(v * 0.50, shadow_cap)
+            deriv_v_shadow = max(v * (0.50 + zw * MAGENTA_SHADOW_V), shadow_cap)
 
             light = QColor.fromHsvF(
                 light_h,
                 # Desaturate toward the light, but never so far that the
-                # highlight stops reading as that colour.
-                self._clamp01(deriv_s * 0.72),
+                # highlight stops reading as that colour. The magenta zone
+                # instead boosts toward the reference's saturated terracotta.
+                self._clamp01(deriv_s * (0.72 + zw * MAGENTA_LIGHT_SAT)),
                 # 45% of the way to white: proportional to the headroom, so a
                 # bright base is not pushed flat and a dark one is not crushed.
                 self._clamp01(deriv_v_light),
@@ -1369,8 +1417,9 @@ class SphereDocker(DockWidget):
                 # Shadows read as more muted than the base, not more vivid. The
                 # old *1.05 pushed saturation up on a darkened colour, which is
                 # what turned shadows into muddy brown. Zero for a very dark
-                # pick, which has no chroma to be muted from.
-                self._clamp01(deriv_s_shadow * 0.92),
+                # pick, which has no chroma to be muted from. The magenta zone
+                # instead boosts toward the reference's violet.
+                self._clamp01(deriv_s_shadow * (0.92 + zw * MAGENTA_SHADOW_SAT)),
                 # Down to 50% of the base, but never below the floor: at 50% of
                 # an already-dark base this landed on the base colour itself.
                 # Darker than that and the shadow collapsed toward black, which
@@ -1427,6 +1476,25 @@ class SphereDocker(DockWidget):
         """
         delta = (target - h + 0.5) % 1.0 - 0.5
         return (h + delta * amount) % 1.0
+
+    @staticmethod
+    def _magenta_weight(h: float) -> float:
+        """Styling strength 0..1 for the magenta-zone derivation extras.
+
+        cos^2 bump with asymmetric support (see MAGENTA_ZONE_*): the warm
+        side fades before orange, the cool side reaches toward violet.
+        Green/blue/grey picks score exactly 0 and derive pixel-identically
+        to the unzoned rule.
+        """
+        try:
+            signed = (((h - MAGENTA_ZONE_CENTER + 0.5) % 1.0) - 0.5) * 360.0
+            half = (MAGENTA_ZONE_MINUS_DEG if signed < 0.0
+                    else MAGENTA_ZONE_PLUS_DEG)
+            if abs(signed) >= half:
+                return 0.0
+            return math.cos(math.radians(abs(signed)) * 90.0 / half) ** 2
+        except Exception:  # pragma: no cover - math only
+            return 0.0
 
     @staticmethod
     def _rgb01(color: QColor):
@@ -1684,9 +1752,16 @@ class SphereDocker(DockWidget):
 
         layout = QVBoxLayout(content)
 
-        header = QHBoxLayout()
+        header = QGridLayout()
         header.setContentsMargins(0, 0, 0, 0)
-        header.setSpacing(6)
+        header.setHorizontalSpacing(6)
+        header.setVerticalSpacing(2)
+        # Gear and picker are fixed; the two swatches (and their hex labels
+        # below) share the stretch so each label sits under its own box.
+        header.setColumnStretch(0, 0)
+        header.setColumnStretch(1, 1)
+        header.setColumnStretch(2, 1)
+        header.setColumnStretch(3, 0)
 
         # 1. Settings
         # 1. Settings (gear). Checkable so it lights up while the popup is
@@ -1696,7 +1771,7 @@ class SphereDocker(DockWidget):
         _set_tooltip(gear, "Settings: light direction, render quality, reset")
         gear.clicked.connect(self._toggle_settings)
         self._gear_btn = gear
-        header.addWidget(gear)
+        header.addWidget(gear, 0, 0)
 
         # 2. Previous color (click to step back)
         self._sw_prev = QFrame()
@@ -1707,7 +1782,7 @@ class SphereDocker(DockWidget):
         self._sw_prev.setStyleSheet(
             "QFrame { background-color: #3b414a; border-radius: 5px; }")
         self._sw_prev.mousePressEvent = self._on_prev_swatch_pressed
-        header.addWidget(self._sw_prev, 1)
+        header.addWidget(self._sw_prev, 0, 1)
 
         # 3. Current (modified) color
         self._sw_current = QFrame()
@@ -1717,7 +1792,42 @@ class SphereDocker(DockWidget):
             "QFrame { background-color: #3b414a; border-radius: 5px; }")
         _set_tooltip(self._sw_current, "Active color")
         self._sw_current.mousePressEvent = self._on_current_swatch_pressed
-        header.addWidget(self._sw_current, 1)
+        header.addWidget(self._sw_current, 0, 2)
+
+        # Copyable hex labels, one under each swatch. Click copies to the
+        # clipboard with a brief confirmation; visibility is a persisted
+        # setting (default on).
+        self._hex_prev = self._make_hex_label("prev")
+        self._hex_current = self._make_hex_label("current")
+        header.addWidget(self._hex_prev, 1, 1)
+        # Edit toggle glued to the current hash: the pair is centered as one
+        # unit (fixed-width hash + tight button) so no gap opens up, and
+        # both sit on the same 20px line.
+        self._hex_locked = True
+        edit = QPushButton("EDIT")
+        edit.setFixedSize(34, 20)
+        edit.setCursor(Qt.PointingHandCursor)
+        edit.setFocusPolicy(Qt.NoFocus)
+        edit.setFlat(True)
+        edit.setStyleSheet(
+            "QPushButton { color: #9aa3b4; font-size: 10px; font-weight: bold; "
+            "background: transparent; border: none; padding: 0px; }"
+            "QPushButton:hover { color: #ccd5e2; }")
+        _set_tooltip(edit, "Allow typing new hex colors")
+        edit.clicked.connect(self._toggle_hex_lock)
+        self._hex_lock_btn = edit
+        self._hex_current.setFixedWidth(56)
+        hexbox = QHBoxLayout()
+        hexbox.setContentsMargins(0, 0, 0, 0)
+        hexbox.setSpacing(4)
+        hexbox.addStretch(1)
+        hexbox.addWidget(self._hex_current, 0)
+        hexbox.addWidget(edit, 0)
+        hexbox.addStretch(1)
+        hexwrap = QWidget()
+        hexwrap.setLayout(hexbox)
+        self._hex_wrap = hexwrap
+        header.addWidget(hexwrap, 1, 2)
 
         # 4. Color picker: hands over to Krita's own Color Sampler tool so the
         # user can click any pixel on the canvas. Checkable: lit while the
@@ -1726,7 +1836,7 @@ class SphereDocker(DockWidget):
         _set_tooltip(pick, "Eyedropper: click a color on the canvas to sample it")
         pick.clicked.connect(self._on_eyedropper_tool)
         self._eyedropper_btn = pick
-        header.addWidget(pick)
+        header.addWidget(pick, 0, 3)
         layout.addLayout(header)
         layout.addSpacing(PANEL_ROW_GAP)
 
@@ -2045,6 +2155,19 @@ class SphereDocker(DockWidget):
             self._sync_target_buttons()
             self._sync_sliders_from_state()
             self._update_preview()
+            # Target-sync stamp (Q3): version + loaded module + target HSV +
+            # row values. A stale install shows the wrong path; a bypassed
+            # sync shows mismatched rows; matching values point at the UI.
+            try:
+                h, s, v = self._hsv_of(key)
+                LOG.info("TARGET_SYNC version=%s module=%s target=%s hsv=(%d,%d,%d) sliders=(%d,%d,%d)",
+                         PLUGIN_VERSION, os.path.abspath(__file__), key,
+                         int(round(h * 359.0)) % 360, int(round(s * 100.0)), int(round(v * 100.0)),
+                         self.hue_row.slider.value(),
+                         self.saturation_row.slider.value(),
+                         self.light_row.slider.value())
+            except Exception:  # pragma: no cover - UI only
+                pass
         except Exception as exc:  # pragma: no cover - UI only
             LOG.exception("_on_target_changed failed")
             print(f"Lumina: on_target_changed failed - {exc}")
@@ -2089,6 +2212,12 @@ class SphereDocker(DockWidget):
             # in _on_color_changed. The engine math is untouched.
             self.color_row.setEnabled(True)
             _set_tooltip(self.color_row, "Overall brightness of the base color")
+            # Dependent interlocks (Q11): Rim Tint means nothing at Rim 0, so
+            # it greys out -- the stored value is kept and returns when Rim
+            # rises again. Gated on the engine's effective value, not the
+            # rounded readout. (Glow has no dependent slider: intensity is
+            # the only control.)
+            self._sync_rim_interlock()
             # Name the target these rows are editing. Now that Light applies to
             # all three, "Light" alone is ambiguous: it could mean the base's
             # lightness or the highlight's.
@@ -2096,6 +2225,28 @@ class SphereDocker(DockWidget):
         finally:
             self._syncing = False
         self._sync_gradient_tracks()
+
+    def _sync_rim_interlock(self) -> None:
+        """Grey out Rim Tint while Rim Strength is at zero (and restore it).
+
+        The stored tint value is never touched: dropping Rim to 0 and back
+        returns the exact previous tint. Called from the rim handler (live
+        drags) and the central slider sync (init/load/preset/reset).
+        """
+        try:
+            rim_live = float(getattr(self.processor.engine, "rim_light", 0.0)) > 0.0
+        except Exception:  # pragma: no cover - UI only
+            rim_live = True
+        try:
+            self.rim_mix_row.setEnabled(rim_live)
+            if rim_live:
+                _set_tooltip(self.rim_mix_row, "Rim tint: key color to sky color")
+            else:
+                _set_tooltip(self.rim_mix_row,
+                             "Rim Tint needs Rim Strength above 0: raise Rim "
+                             "to adjust it (stored value kept)")
+        except Exception:  # pragma: no cover - UI only
+            LOG.exception("_sync_rim_interlock failed")
 
     def _sync_slider_captions(self) -> None:
         """Label the three colour sliders with the target they currently edit.
@@ -2150,6 +2301,8 @@ class SphereDocker(DockWidget):
             _set_tooltip(
                 self._sw_current,
                 "Active color %s - click to make this the new original" % shown.name())
+            if getattr(self, "_hex_current", None) is not None:
+                self._hex_current.setText(shown.name())
             orig = self._original_color
             if orig is not None:
                 self._sw_prev.setStyleSheet(
@@ -2158,13 +2311,156 @@ class SphereDocker(DockWidget):
                 _set_tooltip(
                     self._sw_prev,
                     "Original color %s - click to revert" % orig.name())
+                if getattr(self, "_hex_prev", None) is not None:
+                    self._hex_prev.setText(orig.name())
             else:
                 self._sw_prev.setStyleSheet(
                     "QFrame { background-color: #22262f; border-radius: 5px; "
                     "border: 1px dashed rgba(255,255,255,50); }")
                 _set_tooltip(self._sw_prev, "No original color yet")
+                if getattr(self, "_hex_prev", None) is not None:
+                    self._hex_prev.setText("--")
         except Exception as exc:  # pragma: no cover - cosmetic only
             print(f"Lumina: update_preview failed - {exc}")
+
+    def _make_hex_label(self, which: str) -> QLineEdit:
+        """Small hex readout under a swatch: click-to-copy when locked,
+        typeable when the padlock is open (green)."""
+        label = QLineEdit("--")
+        label.setAlignment(Qt.AlignCenter)
+        label.setCursor(Qt.PointingHandCursor)
+        label.setReadOnly(True)
+        label.setFrame(False)
+        label.setStyleSheet(
+            "QLineEdit { color: #9aa3b4; font-size: 10px; background: transparent; }"
+            "QLineEdit:read-only { color: #9aa3b4; }"
+            "QLineEdit:!read-only { color: #e7eaf2; }")
+        label.setProperty("hex_which", which)
+        _set_tooltip(label, "Click to copy the hex color")
+        label.mousePressEvent = lambda event: self._on_hex_pressed(which, event)
+        label.returnPressed.connect(lambda: self._commit_hex(which))
+        label.editingFinished.connect(self._update_preview)
+        return label
+
+    @staticmethod
+    def _parse_hex_entry(text: str):
+        """Parse a typed hex color (#rrggbb, rrggbb, #rgb). None if invalid."""
+        try:
+            t = str(text).strip().lstrip("#")
+            if len(t) == 3:
+                t = "".join(ch * 2 for ch in t)
+            if len(t) != 6:
+                return None
+            int(t, 16)
+            color = QColor("#" + t.lower())
+            return color if color.isValid() else None
+        except Exception:
+            return None
+
+    def _on_hex_pressed(self, which: str, event=None) -> None:
+        """Locked: copy the hex. Open: behave like a normal edit field."""
+        try:
+            if not getattr(self, "_hex_locked", True):
+                QLineEdit.mousePressEvent(
+                    self._hex_prev if which == "prev" else self._hex_current,
+                    event)
+                return
+            label = self._hex_prev if which == "prev" else self._hex_current
+            text = label.text().strip()
+            if not text or text in ("--", "copied"):
+                return
+            clipboard = QApplication.clipboard()
+            if clipboard is not None:
+                clipboard.setText(text)
+            label.setText("copied")
+            # Only restore if nothing else overwrote the flash meanwhile.
+            QTimer.singleShot(
+                800,
+                lambda: label.setText(text) if label.text() == "copied" else None)
+        except Exception:  # pragma: no cover - UI only
+            LOG.exception("_on_hex_pressed failed")
+
+    def _commit_hex(self, which: str) -> None:
+        """Apply a typed hex value: original swatch, or full lighting set.
+
+        Only the current (right) box commits: the previous box is display
+        plus copy, since editing it changed nothing on screen. The current
+        box behaves like sampling the color with the eyedropper: the
+        sphere's base/light/shadow are derived from it and the brush
+        follows the new base. Setting only the brush left the sphere
+        showing stale lighting for a color the user just chose.
+        """
+        try:
+            if which != "current":
+                self._update_preview()  # previous box never commits
+                return
+            label = self._hex_current
+            color = self._parse_hex_entry(label.text())
+            if color is None:
+                self._update_preview()  # revert invalid input
+                return
+            self._chosen_color = None  # new base replaces any prior pick
+            self._distribute_from(color)
+            self._sync_target_buttons()
+            self._sync_sliders_from_state()
+            self._rebuild_orb()
+            self._update_preview()
+            self._send_to_krita(self._targets["base"])
+        except Exception:  # pragma: no cover - UI only
+            LOG.exception("_commit_hex failed")
+
+    def _toggle_hex_lock(self) -> None:
+        """Flip hex editing; wired to the EDIT/DONE toggle."""
+        try:
+            self._set_hex_locked(not getattr(self, "_hex_locked", True))
+        except Exception:  # pragma: no cover - UI only
+            LOG.exception("_toggle_hex_lock failed")
+
+    def _set_hex_locked(self, locked: bool) -> None:
+        """EDIT/DONE state: locked copies on click, open types new colors.
+
+        Only the current (right) box is ever editable -- editing the
+        previous box changed nothing visible, so it stays display + copy.
+        """
+        try:
+            self._hex_locked = bool(locked)
+            btn = getattr(self, "_hex_lock_btn", None)
+            if btn is not None:
+                btn.setText("DONE" if not self._hex_locked else "EDIT")
+                btn.setStyleSheet(
+                    "QPushButton { color: #58b368; font-size: 10px; font-weight: bold; "
+                    "background: transparent; border: none; padding: 0px; }"
+                    "QPushButton:hover { color: #7bd88f; }"
+                    if not self._hex_locked else
+                    "QPushButton { color: #9aa3b4; font-size: 10px; font-weight: bold; "
+                    "background: transparent; border: none; padding: 0px; }"
+                    "QPushButton:hover { color: #ccd5e2; }")
+                _set_tooltip(
+                    btn, "Stop editing hex colors"
+                    if not self._hex_locked else "Allow typing new hex colors")
+            prev = getattr(self, "_hex_prev", None)
+            if prev is not None:
+                prev.setReadOnly(True)
+                _set_tooltip(prev, "Click to copy the hex color")
+            cur = getattr(self, "_hex_current", None)
+            if cur is not None:
+                cur.setReadOnly(self._hex_locked)
+                _set_tooltip(
+                    cur, "Type a hex color, Enter commits"
+                    if not self._hex_locked else "Click to copy the hex color")
+        except Exception:  # pragma: no cover - UI only
+            LOG.exception("_set_hex_locked failed")
+
+    def _set_hex_visible(self, visible: bool) -> None:
+        """Show/hide the hex row; the persisted display setting."""
+        try:
+            self._show_hex = bool(visible)
+            for label in (getattr(self, "_hex_prev", None),
+                            getattr(self, "_hex_wrap", None)):
+                if label is not None:
+                    label.setVisible(self._show_hex)
+        except Exception:  # pragma: no cover - UI only
+            LOG.exception("_set_hex_visible failed")
 
     def _on_prev_swatch_pressed(self, event) -> None:
         """Left block: revert the active colour back to the original."""
@@ -2216,6 +2512,7 @@ class SphereDocker(DockWidget):
                 int(state["azimuth"]), float(state["elevation"]))
             self._orb_render_size = int(state["quality"])
             self._orb.set_show_pointer(bool(state["pointer"]))
+            self._set_hex_visible(bool(state.get("hex", True)))
             # Highlight size drives the same shininess as the Advanced
             # "Specular" row. The row is synced to match, so the two controls
             # never disagree about the engine value they both own.
@@ -2260,6 +2557,8 @@ class SphereDocker(DockWidget):
             "highlight_size": self._shininess_to_size(eng.shininess),
             "quality": int(getattr(self, "_orb_render_size", ORB_RENDER)),
             "sampler": bool(self._orb._show_pointer),
+            "show_hex": bool(getattr(self, "_show_hex", True)),
+            "hex_locked": bool(getattr(self, "_hex_locked", True)),
             "diffuse": self._knee_to_level(eng.spec_knee),
             "contrast": int(eng.contrast * 100.0),
             "intensity": int(eng.light_intensity * 100.0),
@@ -2336,6 +2635,10 @@ class SphereDocker(DockWidget):
                 self._orb_render_size = int(num("quality", ORB_RENDER, 64, 512))
                 self._orb.set_show_pointer(str(s.value("sampler", "true")).lower()
                                            not in ("false", "0"))
+                self._set_hex_visible(str(s.value("show_hex", "true")).lower()
+                                      not in ("false", "0"))
+                self._set_hex_locked(str(s.value("hex_locked", "true")).lower()
+                                     not in ("false", "0"))
                 saved_version = int(num("version", 1, 1, SETTINGS_VERSION))
                 raw_diffuse = int(num("diffuse", self._knee_to_level(SPEC_KNEE), 0, 100))
                 if saved_version < 4:
@@ -2433,6 +2736,7 @@ class SphereDocker(DockWidget):
                 self._shininess_to_size(eng.shininess),
                 int(getattr(self, "_orb_render_size", ORB_RENDER)),
                 bool(self._orb._show_pointer),
+                bool(getattr(self, "_show_hex", True)),
             )
         except Exception as exc:  # pragma: no cover - cosmetic only
             LOG.exception("_sync_settings_panel failed")
@@ -2504,6 +2808,9 @@ class SphereDocker(DockWidget):
                 self.diffuse_row.set_value(self._knee_to_level(SPEC_KNEE))
                 self.glow_row.set_value(0)
                 self.tone_row.set_value(100)
+                # Display setting back to its default (on).
+                self._set_hex_visible(True)
+                self._set_hex_locked(True)
                 self.rim_row.set_value(14)
                 self.rim_mix_row.set_value(60)
                 self.sky_row.set_value(5)
@@ -2644,6 +2951,11 @@ class SphereDocker(DockWidget):
             # ~120 ms, so a native picker drag would run the shading loop at
             # ~240% of one CPU slot and starve the event loop.
             size = DRAG_RENDER
+        self._last_render_size = size
+        try:
+            self._last_render_smooth = float(self.processor.engine.smooth)
+        except Exception:  # pragma: no cover - UI only
+            self._last_render_smooth = -1.0
         return self.processor.render_image(self._rgb01(self._targets["base"]),
                                            size, size)
 
@@ -2668,10 +2980,16 @@ class SphereDocker(DockWidget):
         """
         self._slider_dragging = False
         self.processor.set_smooth(getattr(self, "_smooth_saved", 2.0))
-        self._rebuild_orb()
+        self._rebuild_orb(reason="slider_release")
 
-    def _rebuild_orb(self):
+    def _rebuild_orb(self, reason: str = "live_update"):
         """Schedule a coalesced orb rebuild and mark settings dirty.
+
+        ``reason`` names the requester for the RENDER_DONE log line
+        (``slider_release`` / ``external_final`` / ``live_update``), so a UI
+        freeze can be attributed to the render that caused it. Coalesced
+        bursts keep the last reason: the executed render is the release or
+        final, not an intermediate tick.
 
         Persisting moved to a debounced flush (see _mark_settings_dirty):
         every user-facing control still ends up saved exactly once, but a
@@ -2687,6 +3005,7 @@ class SphereDocker(DockWidget):
         render per event-loop turn, so dragging stays responsive instead of
         backing up a queue of stale renders.
         """
+        self._pending_reason = reason
         self._rebuild_timer.start(0)
         if getattr(self, "_applying_preset", False):
             # The preset that is mid-apply owns the state right now.
@@ -2766,9 +3085,20 @@ class SphereDocker(DockWidget):
             self._last_orb_ms = now
         started = time.monotonic()
         self._orb.set_image(self._render_orb())
+        render_ms = (time.monotonic() - started) * 1000.0
+        # Attribution line (Q1): every executed render reports its trigger,
+        # resolution and cost, so a freeze maps to the render that caused it.
+        # The throttle reschedule above returns early with the reason still
+        # pending, so the retry logs the original trigger, not the retry.
+        reason = getattr(self, "_pending_reason", "live_update") or "live_update"
+        self._pending_reason = None
+        LOG.info("RENDER_DONE reason=%s size=%d smooth=%.1f ms=%.1f drag_active=%d",
+                 reason, int(getattr(self, "_last_render_size", -1)),
+                 float(getattr(self, "_last_render_smooth", -1.0)), render_ms,
+                 int(bool(getattr(self, "_slider_dragging", False))))
         if getattr(self, "_external_preview", False):
             self._ext_renders += 1
-            elapsed_ms = (time.monotonic() - started) * 1000.0
+            elapsed_ms = render_ms
             self._ext_render_ms += elapsed_ms
             samples = getattr(self, "_ext_render_samples", None)
             if samples is not None:
@@ -2779,7 +3109,7 @@ class SphereDocker(DockWidget):
             # never misattributed to the next burst: this render is the
             # prime hitch suspect for Run 1.
             self._ext_final_pending = False
-            elapsed_ms = (time.monotonic() - started) * 1000.0
+            elapsed_ms = render_ms
             LOG.info("EXT_FINAL ms=%.1f", elapsed_ms)
 
     # ------------------------------------------------------------------
@@ -2985,6 +3315,7 @@ class SphereDocker(DockWidget):
     def _on_rim_changed(self, value):
         try:
             self.processor.set_rim_light(value / 100.0)
+            self._sync_rim_interlock()
             self._rebuild_orb()
         except Exception as exc:
             LOG.exception("_on_rim_changed failed")
@@ -3378,7 +3709,7 @@ class SphereDocker(DockWidget):
             # preview and the full-quality image still has to be produced.
             # Flagged so _rebuild_orb_now logs it standalone as EXT_FINAL.
             self._ext_final_pending = True
-            self._rebuild_orb()
+            self._rebuild_orb(reason="external_final")
             avg, p95, peak = self._render_stats(
                 getattr(self, "_ext_render_samples", None) or [])
             LOG.info("EXT_SUMMARY applies=%d renders=%d avg_ms=%.1f p95_ms=%.1f max_ms=%.1f (final)",

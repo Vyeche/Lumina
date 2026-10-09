@@ -62,7 +62,6 @@ class ColorEngine:
     # point-light energy is now normalized at the reference distance.
     DIFFUSE_FLOOR = 0.10
     DIFFUSE_GAMMA = 0.85
-    WRAP_DIFFUSE = 0.35
 
     SPEC_MAX = 0.24
     # Immutable renderer default. Live state is self.spec_max (property).

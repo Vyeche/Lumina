@@ -11,6 +11,8 @@ sphere widget without pulling in ``color_engine``.
 
 from typing import List, Optional, Sequence, Tuple
 
+import time
+
 from PyQt5.QtCore import (Qt, QPoint, QPointF, QRectF, QSize, QTimer,
                          pyqtSignal)
 from PyQt5.QtGui import (QBrush, QColor, QLinearGradient, QPainter, QPen,
@@ -196,6 +198,14 @@ class ColorSlider(QSlider):
         r = self._handle_radius()
         return max(1.0, float(self.width()) - 2.0 * r)
 
+    def _value_from_x(self, x: float) -> int:
+        """Slider value for a track x, matching :meth:`_handle_x` geometry."""
+        r = self._handle_radius()
+        lo, hi = r, float(self.width()) - r
+        t = 0.0 if hi <= lo else (x - lo) / (hi - lo)
+        t = max(0.0, min(1.0, t))
+        return int(round(self.minimum() + t * (self.maximum() - self.minimum())))
+
     def mousePressEvent(self, event):
         self.beganDrag.emit()
         if event.button() == Qt.LeftButton and \
@@ -210,9 +220,17 @@ class ColorSlider(QSlider):
             self._drag_from_value = self.value()
             event.accept()
             return
-        # Precision editor: a press outside the knob grabs keyboard focus so
-        # arrows still adjust, but never moves the value. Near-misses must
-        # not punish the user with a jump.
+        if event.button() == Qt.LeftButton:
+            # Pressed the track: jump the knob to the click (Krita convention),
+            # then drag relatively from there so the press flows into a drag.
+            self.setValue(self._value_from_x(event.pos().x()))
+            self._dragging = True
+            self._drag_from_x = event.pos().x()
+            self._drag_from_value = self.value()
+            self.setFocus(Qt.MouseFocusReason)
+            event.accept()
+            return
+        # Non-left press: focus for keyboard arrows, never moves the value.
         self._dragging = False
         self.setFocus(Qt.MouseFocusReason)
         event.accept()
@@ -434,6 +452,7 @@ class SettingsPanel(QWidget):
     * **Render quality** - the orb is shaded in pure Python, so the grid
       resolution trades smoothness against fidelity while dragging.
     * **Picker pointer** - show/hide the sampling ring on the orb.
+    * **Hex values** - show/hide the copyable hex labels under the swatches.
     * **Reset** - restore every target and lighting parameter to its default.
     """
 
@@ -494,6 +513,10 @@ class SettingsPanel(QWidget):
         self.pointer_cb.setChecked(True)
         root.addWidget(self.pointer_cb)
 
+        self.hex_cb = CheckBox("Show hex values")
+        self.hex_cb.setChecked(True)
+        root.addWidget(self.hex_cb)
+
         # Sends the base color to Krita's foreground so the brush can use it.
         # Moved here from the main panel, where it sat below the presets as a
         # full-width button: it is an action, not a setting, and the panel reads
@@ -542,6 +565,7 @@ class SettingsPanel(QWidget):
         self.elevation.valueChanged.connect(self._emit)
         self.highlight_size.valueChanged.connect(self._emit)
         self.pointer_cb.stateChanged.connect(self._emit)
+        self.hex_cb.stateChanged.connect(self._emit)
 
     @staticmethod
     def _btn_style(on: bool) -> str:
@@ -628,6 +652,7 @@ class SettingsPanel(QWidget):
                 "highlight_size": self.highlight_size.value(),
                 "quality": self._quality,
                 "pointer": self.pointer_cb.isChecked(),
+                "hex": self.hex_cb.isChecked(),
             })
 
     def bind(self, on_change, on_reset, on_save=None):
@@ -641,7 +666,7 @@ class SettingsPanel(QWidget):
         self._saved_timer.start(1600)
 
     def sync_from(self, azimuth, elevation, highlight_size, quality,
-                    pointer) -> None:
+                    pointer, hex_labels=True) -> None:
         """Mirror engine state into the widgets without emitting.
 
         Every one of these widgets reports the panel's *entire* state on
@@ -650,7 +675,7 @@ class SettingsPanel(QWidget):
         state is a single silent step.
         """
         widgets = (self.azimuth, self.elevation, self.highlight_size,
-                   self.pointer_cb)
+                   self.pointer_cb, self.hex_cb)
         for w in widgets:
             w.blockSignals(True)
         try:
@@ -658,6 +683,7 @@ class SettingsPanel(QWidget):
             self.elevation.setValue(int(elevation))
             self.highlight_size.setValue(int(highlight_size))
             self.pointer_cb.setChecked(bool(pointer))
+            self.hex_cb.setChecked(bool(hex_labels))
             for name, res in self.QUALITY:
                 self._quality_buttons[name].setChecked(res == int(quality))
                 self._quality_buttons[name].setStyleSheet(
@@ -733,7 +759,7 @@ class CollapsibleSection(QWidget):
         return self._expanded
 
 
-HEADER_HEIGHT = 22      # height of a CollapsibleSection header bar
+HEADER_HEIGHT = 30      # height of a CollapsibleSection header bar
 
 
 class _SectionHeader(QWidget):
@@ -744,6 +770,7 @@ class _SectionHeader(QWidget):
         self._title = title
         self._accent = QColor(accent)
         self._expanded = bool(expanded)
+        self._last_toggle_ms = 0.0
         self.setFixedHeight(HEADER_HEIGHT)
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.StrongFocus)
@@ -756,6 +783,13 @@ class _SectionHeader(QWidget):
     def mousePressEvent(self, event):
         try:
             if event.button() == Qt.LeftButton:
+                # Debounce: a double-click otherwise toggles open-then-shut,
+                # which reads as "sometimes doesn't open".
+                now_ms = time.monotonic() * 1000.0
+                if now_ms - self._last_toggle_ms < 400.0:
+                    event.accept()
+                    return
+                self._last_toggle_ms = now_ms
                 self._expanded = not self._expanded
                 self.update()
                 window = self.window()

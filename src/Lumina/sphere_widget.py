@@ -21,12 +21,12 @@ from PyQt5.QtWidgets import QWidget
 # band the sample point is projected onto the circle, letting the cursor glide
 # around the rim; past it, picking stops. Kept small so the transparent corners
 # of the square around the orb stay genuinely unpickable.
-EDGE_GLIDE = 6.0
+EDGE_GLIDE = 32.0
 
 # Inset between the widget edge and the drawn orb, in pixels. Must exceed
 # EDGE_GLIDE, otherwise the circle touches the widget bounds and the glide band
 # is unreachable at the four points where they meet.
-ORB_MARGIN = 8.0
+ORB_MARGIN = 20.0
 
 # ---------------------------------------------------------------------------
 # Logging — shared setup in lumina_logging (file handler never holds the
@@ -352,6 +352,21 @@ class SphereWidget(QWidget):
             v *= k
         # Derived from the (possibly projected) u/v rather than the raw point,
         # so the projected case samples the rim instead of a masked-out pixel.
+        r = math.sqrt(u * u + v * v)
+        if r > 0.0:
+            # Erode the pickable disc ~2 image pixels. The outermost ring
+            # carries coverage-grid antialiasing blended with the background,
+            # so sampling it reports a darkened mix instead of the sphere
+            # colour -- hovering the rim read the backdrop, not the orb.
+            # Only the fringe band is pulled inward; interior samples are
+            # untouched, and the glide projection above still lands the
+            # pointer on the rim.
+            inset = 4.0 / float(res)
+            band = 12.0 / float(res)
+            if r > 1.0 - band:
+                k = max(0.0, (r - inset) / r)
+                u *= k
+                v *= k
         sx = max(0, min(res - 1, int(round((u + 1.0) * 0.5 * (res - 1)))))
         sy = max(0, min(res - 1, int(round((v + 1.0) * 0.5 * (res - 1)))))
         return max(0, min(res - 1, sx)), max(0, min(res - 1, sy))

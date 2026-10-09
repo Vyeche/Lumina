@@ -431,3 +431,28 @@ def test_geometry_cache_survives_size_switch():
     before = switched._normal_grid
     switched.render(base, 200, 200)
     assert switched._normal_grid is before
+
+
+def test_tuning_gate_deterministic_and_sane():
+    """Q9 harness: identical runs give identical metrics; all metrics sane.
+
+    The gate is the objective referee for the defaults rebalance. If the
+    harness itself wobbles, no A/B comparison means anything.
+    """
+    import importlib.util as _ilu
+    spec = _ilu.spec_from_file_location(
+        "tuning_gate", "tools/tuning_gate.py")
+    gate = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    first = gate.measure()
+    second = gate.measure()
+    assert first == second
+    assert set(first) == {"red", "green", "blue", "gray"}
+    for name, m in first.items():
+        assert set(m) == {"terminator_px", "shadow_luma", "highlight_dia",
+                          "range", "crease"}, (name, m)
+        assert m["range"] > 0.05, (name, m)
+        assert m["terminator_px"] >= 0.0, (name, m)
+        assert 0.0 <= m["shadow_luma"] <= 1.0, (name, m)
+        assert m["highlight_dia"] >= 0.0, (name, m)
+        assert m["crease"] >= 0.0, (name, m)

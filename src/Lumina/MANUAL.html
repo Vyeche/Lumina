@@ -60,6 +60,12 @@ the eyedropper. Clicking the sphere does not change the sphere.</strong></p>
 <p>The two color blocks are a <em>split color preview</em>: the left never changes on its
 own, and the right always shows the color currently in play. They only diverge
 while you are editing.</p>
+<p>Under each block sits its <strong>hex value</strong>. Click a hex value to copy it to the
+clipboard. The <strong>EDIT</strong> button tucked against the current hash unlocks typing
+(green <strong>DONE</strong> while open): type a new hex color into the current box and
+press Enter — the full lighting set is derived from it, like eyedropping.
+The previous box is display plus copy only. The
+lock state is saved with your settings.</p>
 <h3>The orb</h3>
 <p>A sphere lit by the three target colors. <strong>Drag the color sampler</strong> — the small
 ring that follows your pointer — to read the color under it; its centre always
@@ -125,7 +131,9 @@ shows the exact color being sampled, and the RGB value appears underneath.</p>
 </table>
 <p>The selected target shows on its <strong>color swatch</strong> beside the icon, which grows slightly and takes a white rim. The icons themselves never change.</p>
 <h3>Sliders</h3>
-<p>Every slider shows its value at the right end.</p>
+<p>Every slider shows its value at the right end. Clicking a slider's track
+jumps the knob to the click (then keep holding to drag); grabbing the knob
+itself drags relatively from its current value.</p>
 <h4>Typing values</h4>
 <p>Click a value and type to set it directly. Display is always
 canonical-with-unit: percent rows show <code>86%</code>, angle rows <code>323°</code>, unitless
@@ -280,6 +288,9 @@ three always blend:</p>
   its hue moved slightly <strong>toward the ambient's hue</strong> — the complement of the key
   light, a cool 209°.</li>
 </ul>
+<p>Near magenta and red the moves are stronger and saturation is kept or boosted
+rather than muted, so a mauve base derives a violet shadow and a terracotta
+light; green, blue, and grey derive exactly as described above.</p>
 <p>This is the standard hue-shifting rule: lit surfaces take the hue of the light,
 shadowed ones the hue of the ambient fill. Both are expressed as a <em>target hue</em>
 rather than a fixed offset, because "warmer" has no single direction around the

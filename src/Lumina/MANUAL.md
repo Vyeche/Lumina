@@ -49,6 +49,13 @@ The two color blocks are a *split color preview*: the left never changes on its
 own, and the right always shows the color currently in play. They only diverge
 while you are editing.
 
+Under each block sits its **hex value**. Click a hex value to copy it to the
+clipboard. The **EDIT** button tucked against the current hash unlocks typing
+(green **DONE** while open): type a new hex color into the current box and
+press Enter — the full lighting set is derived from it, like eyedropping.
+The previous box is display plus copy only. The
+lock state is saved with your settings.
+
 ### The orb
 
 A sphere lit by the three target colors. **Drag the color sampler** — the small
@@ -86,7 +93,9 @@ The selected target shows on its **color swatch** beside the icon, which grows s
 
 ### Sliders
 
-Every slider shows its value at the right end.
+Every slider shows its value at the right end. Clicking a slider's track
+jumps the knob to the click (then keep holding to drag); grabbing the knob
+itself drags relatively from its current value.
 
 #### Typing values
 
@@ -153,6 +162,10 @@ three always blend:
 - **Shadow** — the base taken down to **42% of its value**, slightly *muted*, and
   its hue moved slightly **toward the ambient's hue** — the complement of the key
   light, a cool 209°.
+
+Near magenta and red the moves are stronger and saturation is kept or boosted
+rather than muted, so a mauve base derives a violet shadow and a terracotta
+light; green, blue, and grey derive exactly as described above.
 
 This is the standard hue-shifting rule: lit surfaces take the hue of the light,
 shadowed ones the hue of the ambient fill. Both are expressed as a *target hue*
