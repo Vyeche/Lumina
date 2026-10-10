@@ -124,7 +124,7 @@ SAVE_DEBOUNCE_MS = 2000
 # Plugin version, logged at startup with the loaded module path so stale or
 # half-reinstalled copies are visible in bug reports. Keep in sync with
 # src/Lumina.desktop (X-KDE-PluginInfo-Version); bump both per release.
-PLUGIN_VERSION = "2.7.0"
+PLUGIN_VERSION = "2.8.0"
 # Settings schema version. v1 stored Tone as brightness (bug); v2 stores Tone
 # as saturation. v3 persists spec_max. v4 migrates Diffuse/highlight-size
 # slider levels to the perceptual curves (old linear positions reinterpreted

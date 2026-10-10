@@ -463,7 +463,7 @@ def test_target_switch_logs_sync_stamp():
         _sd.LOG.removeHandler(probe)
     stamps = [ln for ln in probe.lines if ln.startswith("TARGET_SYNC")]
     assert len(stamps) == 1, probe.lines
-    assert "version=2.7.0" in stamps[0], stamps[0]
+    assert "version=%s" % _sd.PLUGIN_VERSION in stamps[0], stamps[0]
     assert "target=shadow" in stamps[0], stamps[0]
     # OKLCH stamp; the rows must show exactly what the stamp says.
     import re as _re
