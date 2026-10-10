@@ -14,7 +14,7 @@ cd Lumina
 python3 -m pytest src/Lumina/ -q
 ```
 
-All 54 tests should pass: the stdlib suite (parser, engine, calibration)
+All 78 tests should pass: the stdlib suite (parser, engine, calibration)
 plus the offscreen-Qt suite (readouts, sliders, docker state machine).
 
 ## Trying changes in Krita (flatpak)

@@ -25,8 +25,24 @@ Pixel = Tuple[int, int, int]
 Normal = Tuple[float, float, float]
 
 
+class RenderCancelled(Exception):
+    """A render stopped by its cancel flag (see ColorEngine._cancel)."""
+
+
 class ColorEngine:
     """Generate a shaded, front-facing 3D sphere as an RGB pixel grid."""
+
+    # Anything with is_set() (a threading.Event), checked once per row of
+    # each stage: an off-thread render nobody wants any more stops within a
+    # row instead of taking the CPU from the previews that replaced it. The
+    # stage caches are committed only once a stage completes, so a stop
+    # leaves them consistent.
+    _cancel = None
+
+    def _check_cancel(self) -> None:
+        cancel = self._cancel
+        if cancel is not None and cancel.is_set():
+            raise RenderCancelled()
 
     LIGHT_TYPES = ("Point", "Sun", "Spot", "Area")
     MIXER_MODES = ("Blended", "Additive", "Multiplicative")
@@ -54,18 +70,132 @@ class ColorEngine:
     # Square/Rectangle/Disk integration (spec spread, shadow softness).
     AREA_SIZE = 2.0
 
-    AMBIENT_SCALE = 1.0
+    AMBIENT_SCALE = 1.2
     AMBIENT_SKY = (0.72, 0.78, 0.92)
-    AMBIENT_SKY_MIX = 0.18
+    # The sky-tinted share of the flat ambient fill. 0: the reference lighting
+    # app shows no grey-blue wash over the lit body, and fitting against it
+    # drove this to zero (it read as desaturation, most visibly on reds).
+    AMBIENT_SKY_MIX = 0.0
 
     # Artistic defaults. These values are intentionally moderate because the
     # point-light energy is now normalized at the reference distance.
-    DIFFUSE_FLOOR = 0.10
-    DIFFUSE_GAMMA = 0.85
+    # Raised from 0.10 with the tone-curve change below: the reference keeps
+    # the unlit side in the shadow colour rather than near-black.
+    DIFFUSE_FLOOR = 0.076
+    # How soon the diffuse response LEVEL * (1 + g)E / (1 + gE) bends over
+    # (DIFFUSE_LEVEL below sets how high it goes). It was 1.155 with the
+    # level tied to it (2gE/(1+gE)): the shade then rose fast and was nearly
+    # at full brightness by N.L 0.3, squeezed into a narrow band. The
+    # reference brightens almost linearly from the terminator to N.L 0.6,
+    # a long grade into the shadow (issue #45, round 2).
+    DIFFUSE_GAIN = 0.329
+    # Shadow build-up. The reference darkens evenly through the terminator
+    # into its core band; clamping the diffuse term to the floor stopped it
+    # dead there and left a flat plateau behind it, which read as a hard
+    # line. The floor is met with a smooth maximum of this width instead
+    # (0 = the plain clamp).
+    FLOOR_SOFTNESS = 0.193
+    # Reflected light: light bounced back into the shadow side, strongest at
+    # the silhouette. The reference's unlit side is darkest in a band behind
+    # the terminator and lifts again toward the edge, in the surface's own
+    # colour. 0 = off.
+    REFLECT_STRENGTH = 0.065
+    REFLECT_POWER = 3.5          # used only when REFLECT_END is 0
+    # The bounce comes from the side opposite the light: the reference lifts
+    # its lower-left limb (light from the upper right) but not the lower
+    # right. Weight = alignment with the light's opposite direction ** SPREAD;
+    # 0 = all the way round.
+    REFLECT_SPREAD = 3.88
+    # Shape of the reflected band across the limb, as edge = 1 - N.z. With
+    # REFLECT_END > 0 it rises as a smoothstep from REFLECT_START to
+    # REFLECT_END and then holds: a band with depth, rising out of the core
+    # and levelling off at the silhouette, as the reference's does. 0 = the
+    # old edge ** REFLECT_POWER, which put nearly all of it in a thin line
+    # at the very edge.
+    REFLECT_START = 0.38
+    REFLECT_END = 0.82
+    # Level of the diffuse curve at full light. The curve is
+    # LEVEL * (1 + g)E / (1 + gE): g (DIFFUSE_GAIN) sets how soon it bends
+    # over and LEVEL how high it goes, so the shade can grade longer
+    # without dimming the lit body. 0 = 2g / (1 + g), the old 2gE/(1+gE).
+    DIFFUSE_LEVEL = 1.32
+    # Shadow hue (issue #45). The reference darkens through the shadow with
+    # its chroma in step with its lightness -- the shadow is the same rich
+    # colour, darker -- and its hue moves toward the shadow target steadily,
+    # from the lit side of the terminator into the core. The shadow target
+    # is an ingredient for hue and chroma, not a lightness to reach (green's
+    # #00a793 is lighter than the reference's own core).
+    #
+    # With SHADOW_HUE_MAX > 0 the surface colour on the shadow side keeps the
+    # base's lightness and moves its OKLab chroma direction (a/L, b/L) toward
+    # the shadow target's, by up to SHADOW_HUE_MAX, rising smoothly as signed
+    # N.L goes from SHADOW_HUE_START down to SHADOW_HUE_CORE (negative: past
+    # the terminator). The lighting supplies all the darkening. 0 = the
+    # linear shadow-colour mix (TONAL_SHADOW_MIX).
+    SHADOW_HUE_MAX = 0.575
+    SHADOW_HUE_START = 0.57
+    SHADOW_HUE_CORE = -0.32
+    SHADOW_HUE_LUT_SIZE = 256
+    # Environment light (the sky-tinted ambient and the sky / ground bounce)
+    # reflects off the surface's own colour: 1 = multiplied by it, as light
+    # does. 0 = added as plain light, which washed a grey film over dark,
+    # saturated shadows.
+    ENV_ALBEDO = 0.7
 
-    SPEC_MAX = 0.24
+    # Tonal path, fitted to the reference app's spheres (Ref Tester document):
+    # shadow -> base across N.L in [TONAL_SHADOW_START, TONAL_BASE], then
+    # base -> light as ((N.L - TONAL_BASE) / (1 - TONAL_BASE)) ** POWER, so
+    # the light colour gathers into the highlight instead of washing over the
+    # whole lit half (the old 0.62-1.0 smoothstep did that).
+    TONAL_SHADOW_START = 0.0
+    TONAL_BASE = 0.60
+    # 8.0 -> 2.39 and TONAL_LIGHT_MAX 0.4 -> 0.16 with the highlight refit
+    # (issue #45): a smaller share of the light colour, spread more evenly
+    # over the lit side, instead of a strong dose packed at the peak.
+    TONAL_LIGHT_POWER = 2.39
+    # How much of each target the sphere actually reaches. The reference uses
+    # the targets as ingredients, not paint: its unlit side is roughly a
+    # base/shadow mix (hue between the two), darkened by the shading, and its
+    # highlight only part of the way to the light target. 1.0 = the target
+    # itself at the extremes.
+    TONAL_SHADOW_MIX = 0.62
+    TONAL_LIGHT_MAX = 0.16
+    # Warmth of the default (white) specular, scaled by the base's
+    # saturation: the reference's highlight is warm on saturated colours
+    # (green #d3f2a6, orange #faceab) and neutral on greys (black #b3b3b3).
+    # A preset's own highlight colour is never altered. 0 = always white.
+    SPEC_WARMTH = 0.51
+    SPEC_WARM_TINT = (1.0, 0.88, 0.65)
+    # Where the highlight sits (issue #45). The reference's highlight peaks
+    # about two thirds of the way out toward the light and stays bright to
+    # the lit silhouette -- a lobe around the light direction itself -- not
+    # around the Blinn half-vector, which put Lumina's nearer the centre and
+    # let it die well before the edge. The lobe's axis slides from the
+    # half-vector (0) to the light direction (1). 0.845 with the highlight
+    # refit: the reference peaks about 0.66 of the way out; at 0.875 (and a
+    # stronger sheen) Lumina's sat at 0.74, almost on the light direction.
+    SPEC_TOWARD_LIGHT = 0.845
+
+    # Display roll-off: values pass through unchanged up to this point, then
+    # ease exponentially toward 1. It replaced a plain Reinhard x/(1+x), which
+    # compressed everything -- a fully lit #ff0000 rendered as a muddy #bb0000
+    # and a white highlight topped out near #bcbcbc. 0.646 -> 0.556 with the
+    # highlight refit: the peak eases off sooner, as the reference's does.
+    TONE_SHOULDER = 0.556
+
+    SPEC_MAX = 0.61
+    # Glow: light added at the lit silhouette, in the highlight colour, at
+    # this share of the Glow value. 0.18 left even Glow 100% at under a fifth
+    # of a stop -- the slider barely showed and Neon had no bloom.
+    GLOW_GAIN = 0.5
     # Immutable renderer default. Live state is self.spec_max (property).
-    SPEC_MAX_DEFAULT = 0.24
+    SPEC_MAX_DEFAULT = 0.61
+    # Engine-side scale on the specular sheen, under the user's Highlight
+    # strength (spec_max): fitted against the reference's peak brightness
+    # without moving anyone's saved slider. 1.0 = unscaled. 0.748: Lumina's
+    # peak was 0.02-0.10 OKLab L brighter than the reference's on every
+    # sphere (0.06 on average).
+    SPEC_GAIN = 0.748
     SPEC_TIGHT = 0.90
     SPEC_KNEE = 0.22
     SPEC_KNEE_MIN = 0.02
@@ -80,20 +210,29 @@ class ColorEngine:
     _SRGB_LUT = None
 
     RIM_POWER = 5.0
-    RIM_LIGHT = 0.14
+    # 0.10: the reference's lit silhouette carries no white film; its edge
+    # light on the shadow side is the reflected bounce above.
+    RIM_LIGHT = 0.10
     # Immutable rim default. Live state is self.rim_light (property).
-    RIM_LIGHT_DEFAULT = 0.14
+    RIM_LIGHT_DEFAULT = 0.10
     # Rim tint blend: rim_color = lerp(light, sky, RIM_SKY_MIX), so the edge
     # accent separates chromatically instead of re-tinting the warm body.
     RIM_SKY_MIX = 0.60
     # Hemisphere bounce strengths (directional environmental form, separate
     # from the flat ambient floor). Deliberately small.
-    SKY_BOUNCE = 0.05
-    GROUND_BOUNCE = 0.02
+    SKY_BOUNCE = 0.02
+    GROUND_BOUNCE = 0.01
     GROUND_COLOR = (0.32, 0.26, 0.20)
     RIM_TOP_WEIGHT = 0.35
     RIM_BOTTOM_GAIN = 1.0
     RIM_SHADOW_LIFT = 0.0
+
+    # Output-cache algorithm versions (issue #40 §1). Bump
+    # RENDER_ALGORITHM_VERSION whenever any class-level constant or pipeline
+    # stage above changes output pixels; GEOMETRY_ALGORITHM_VERSION covers
+    # the normal/mask/coverage grids, which derive purely from dimensions.
+    RENDER_ALGORITHM_VERSION = 6  # #45: highlight peak refit
+    GEOMETRY_ALGORITHM_VERSION = 1
 
     DARK_FALLOFF = 0.80
     DARK_WASH = 0.06
@@ -107,13 +246,15 @@ class ColorEngine:
         self.resolution = max(8, min(int(resolution), 512))
 
         # User-facing controls.
-        self.ambient = 0.10
+        self.ambient = 0.05
         # Azimuth convention: 0 = right, 90 = bottom, 270 = top.
         # 274 mirrors the requested 86 across the horizontal: same dial
         # position, but the key light comes from above as painters expect.
-        self.light_azimuth = 287.0
-        self.light_elevation = 45.0
-        self.shininess = 3.52
+        # 304/41 (upper right) is where the reference lighting app's light
+        # sits, recovered by fitting its spheres; it replaced 287/45.
+        self.light_azimuth = 304.0
+        self.light_elevation = 41.0
+        self.shininess = 8.9
         self.spec_knee = 0.22
         # Live specular ceiling. SPEC_MAX/SPEC_MAX_DEFAULT is the immutable
         # renderer default; spec_max property is the single source of truth.
@@ -771,9 +912,58 @@ class ColorEngine:
 
     def _tonal_weights(self, ndl: float):
         # Scalar zone weights; the table version below must match exactly.
-        tonal_position = self._clamp(ndl) ** self.DIFFUSE_GAMMA
-        return (self._smoothstep(0.0, 0.62, tonal_position),
-                self._smoothstep(0.62, 1.0, tonal_position))
+        return self._tonal_pair(self._clamp(ndl))
+
+    @staticmethod
+    def _linear_to_oklab(c):
+        l = 0.4122214708 * c[0] + 0.5363325363 * c[1] + 0.0514459929 * c[2]
+        m = 0.2119034982 * c[0] + 0.6806995451 * c[1] + 0.1073969566 * c[2]
+        s = 0.0883024619 * c[0] + 0.2817188376 * c[1] + 0.6299787005 * c[2]
+        l, m, s = (math.copysign(abs(v) ** (1.0 / 3.0), v) for v in (l, m, s))
+        return (0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+                1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+                0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s)
+
+    @staticmethod
+    def _oklab_to_linear(L, a, b):
+        l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3
+        m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3
+        s = (L - 0.0894841775 * a - 1.2914855480 * b) ** 3
+        return (max(0.0, 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s),
+                max(0.0, -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s),
+                max(0.0, -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s))
+
+    def _shadow_hue_lut(self, shadow_linear, base_linear):
+        """Surface colour across signed N.L in [-1, 1] (see SHADOW_HUE_MAX)."""
+        size = self.SHADOW_HUE_LUT_SIZE
+        Lb, ab, bb = self._linear_to_oklab(base_linear)
+        Ls, as_, bs = self._linear_to_oklab(shadow_linear)
+        nb = (ab / Lb, bb / Lb) if Lb > 1e-4 else (0.0, 0.0)
+        ns = (as_ / Ls, bs / Ls) if Ls > 1e-4 else nb
+        start, core, top = self.SHADOW_HUE_START, self.SHADOW_HUE_CORE, self.SHADOW_HUE_MAX
+        span = (start - core) if start > core else 1e-6
+        table = []
+        for i in range(size):
+            sn = -1.0 + 2.0 * i / (size - 1)
+            t = (start - sn) / span
+            t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
+            w = top * t * t * (3.0 - 2.0 * t)
+            if w <= 0.0:
+                table.append(tuple(base_linear))
+                continue
+            na = nb[0] + (ns[0] - nb[0]) * w
+            nbb = nb[1] + (ns[1] - nb[1]) * w
+            table.append(self._oklab_to_linear(Lb, Lb * na, Lb * nbb))
+        return table
+
+    @classmethod
+    def _tonal_pair(cls, ndl: float):
+        lo, mid = cls.TONAL_SHADOW_START, cls.TONAL_BASE
+        ramp = min(1.0, max(0.0, (ndl - lo) / (mid - lo)))
+        shadow_to_base = 1.0 - cls.TONAL_SHADOW_MIX * (1.0 - ramp)
+        base_to_light = cls.TONAL_LIGHT_MAX * min(
+            1.0, max(0.0, (ndl - mid) / (1.0 - mid))) ** cls.TONAL_LIGHT_POWER
+        return shadow_to_base, base_to_light
 
     TONAL_LUT_SIZE = 256
     _TONAL_LUT = None
@@ -783,9 +973,7 @@ class ColorEngine:
         if cls._TONAL_LUT is None:
             table = []
             for i in range(cls.TONAL_LUT_SIZE):
-                pos = (i / float(cls.TONAL_LUT_SIZE - 1)) ** cls.DIFFUSE_GAMMA
-                table.append((cls._smoothstep(0.0, 0.62, pos),
-                              cls._smoothstep(0.62, 1.0, pos)))
+                table.append(cls._tonal_pair(i / float(cls.TONAL_LUT_SIZE - 1)))
             cls._TONAL_LUT = table
         return cls._TONAL_LUT
 
@@ -875,9 +1063,18 @@ class ColorEngine:
 
     @staticmethod
     def _tone_map(color: Color) -> Color:
-        # Reinhard is used only as a final safety net for specular/highlight
-        # values above display range. It is applied per channel in linear RGB.
-        return tuple(c / (1.0 + max(0.0, c)) for c in color)  # type: ignore[return-value]
+        # Same roll-off as the render loop: identity below the shoulder.
+        return tuple(ColorEngine._shoulder(c) for c in color)  # type: ignore[return-value]
+
+    @classmethod
+    def _shoulder(cls, c: float) -> float:
+        if c <= 0.0:
+            return 0.0
+        k = cls.TONE_SHOULDER
+        if c <= k:
+            return c
+        span = 1.0 - k
+        return k + span * (1.0 - math.exp(-(c - k) / span))
 
     @staticmethod
     def _noise(row: int, col: int) -> float:
@@ -912,9 +1109,20 @@ class ColorEngine:
     #   MATERIAL: body up to the mixer        (light + colors + material)
     #   DISPLAY:  everything from contrast on (cheap: LUTs, mults, 1 pow)
     # ------------------------------------------------------------------
+    def _effective_highlight(self, base_srgb) -> Color:
+        """The specular colour for this base: a preset's colour as set, the
+        default white warmed by SPEC_WARMTH in proportion to saturation."""
+        hl = tuple(self.highlight_color)
+        if self.SPEC_WARMTH <= 0.0 or hl != (1.0, 1.0, 1.0):
+            return hl
+        top = max(base_srgb)
+        sat = (top - min(base_srgb)) / top if top > 0.0 else 0.0
+        w = self.SPEC_WARMTH * min(1.0, sat / 0.5)
+        return tuple(1.0 + (c - 1.0) * w for c in self.SPEC_WARM_TINT)
+
     def _light_cache_key(self, width: int, height: int):
         return (self.light_type, self.light_azimuth, self.light_elevation,
-                self.light_intensity, width, height)
+                self.light_intensity, width, height, self.SPEC_TOWARD_LIGHT)
 
     def _build_light_stage(self, width: int, height: int):
         """Per-pixel light direction, illuminance and NdotL. Cached by key."""
@@ -925,7 +1133,9 @@ class ColorEngine:
         illums: List[List[float]] = []
         ndls: List[List[float]] = []
         halfs: List[List[Normal]] = []
+        toward = self.SPEC_TOWARD_LIGHT
         for row in range(height):
+            self._check_cancel()
             lrow: List[Normal] = []
             erow: List[float] = []
             nrow: List[float] = []
@@ -947,8 +1157,12 @@ class ColorEngine:
                 # Blinn-Phong halfway vector H = normalize(L + V) with fixed
                 # V=(0,0,1). Depends only on the light, so it lives in the
                 # light cache instead of costing a sqrt per material pixel.
-                hrow.append(self._normalize3(
-                    ldir[0], ldir[1], ldir[2] + 1.0))
+                hx, hy, hz = self._normalize3(ldir[0], ldir[1], ldir[2] + 1.0)
+                if toward > 0.0:
+                    hx, hy, hz = self._normalize3(hx + (ldir[0] - hx) * toward,
+                                                  hy + (ldir[1] - hy) * toward,
+                                                  hz + (ldir[2] - hz) * toward)
+                hrow.append((hx, hy, hz))
                 lrow.append(ldir)
                 erow.append(illuminance)
                 nrow.append(ndl)
@@ -970,6 +1184,26 @@ class ColorEngine:
                 eng.spec_max, eng.mixer_mode, eng.sky_bounce,
                 eng.ground_bounce)
 
+    def render_signature(self):
+        """Explicit full-render signature for the one-entry output cache.
+
+        Every output-affecting setting, unrounded (no float rounding: two
+        states that differ by any amount are different keys). Class-level
+        pipeline constants are covered by RENDER_ALGORITHM_VERSION, which
+        must be bumped whenever they change output. Geometry derives purely
+        from dimensions plus GEOMETRY_ALGORITHM_VERSION (see the processor
+        key); the base color is part of the processor key, not here.
+        """
+        return (self.light_type, self.light_azimuth, self.light_elevation,
+                self.light_intensity, tuple(self.light_color),
+                tuple(self.shadow_color), tuple(self.highlight_color),
+                tuple(self.ambient_color), self.ambient, self.shininess,
+                self.spec_knee, self.spec_max, self.rim_light,
+                self.rim_sky_mix, self.sky_bounce, self.ground_bounce,
+                self.contrast, self.brightness, self.saturation,
+                self.mixer_mode, self.glow_intensity, self.glow_radius,
+                self.grain, self.smooth)
+
     def _build_material_stage(self, width, height, key, colors):
         """Body color through the mixer (pre-contrast). Cached by key."""
         if key == self._material_cache_key_value:
@@ -983,15 +1217,33 @@ class ColorEngine:
         spec_knee = max(self.SPEC_KNEE_MIN, min(self.SPEC_KNEE_MAX, self.spec_knee))
         mixer = self.mixer_mode
         spec_max = self.spec_max
+        spec_gain = self.SPEC_GAIN
         tonal_lut = self._tonal_lut()
         tonal_last = len(tonal_lut) - 1
         ambient_base = self.ambient * self.AMBIENT_SCALE
         ambient_k = self.ambient * 0.35
         ambient_sky_mix = self.AMBIENT_SKY_MIX
         diffuse_floor = self.DIFFUSE_FLOOR
+        diffuse_gain = self.DIFFUSE_GAIN
+        diffuse_level = self.DIFFUSE_LEVEL
+        if diffuse_level <= 0.0:
+            diffuse_level = 2.0 * diffuse_gain / (1.0 + diffuse_gain)
+        diffuse_k = diffuse_level * (1.0 + diffuse_gain)
+        floor_soft = self.FLOOR_SOFTNESS
+        env_k = self.ENV_ALBEDO
+        hue_lut = (self._shadow_hue_lut(shadow_linear, base_linear)
+                   if self.SHADOW_HUE_MAX > 0.0 else None)
+        hue_last = self.SHADOW_HUE_LUT_SIZE - 1
+        reflect_k = self.REFLECT_STRENGTH
+        reflect_p = self.REFLECT_POWER
+        reflect_s = self.REFLECT_SPREAD
+        reflect_a = self.REFLECT_START
+        reflect_e = self.REFLECT_END
+        reflect_span = reflect_e - reflect_a
         sky_b = self.sky_bounce
         ground_b = self.ground_bounce
         for row in range(height):
+            self._check_cancel()
             brow: List[Color] = []
             mrow = self._mask_grid[row]
             nrm_row = self._normal_grid[row]
@@ -1012,15 +1264,21 @@ class ColorEngine:
                 if ndlc < 0.0:
                     ndlc = 0.0
                 shadow_to_base, base_to_light = tl[int(ndlc * tonal_last + 0.5)]
-                # Inline double-lerp: shadow -> base -> light.
-                t0r = shadow_linear[0] + (base_linear[0] - shadow_linear[0]) * shadow_to_base
-                t0g = shadow_linear[1] + (base_linear[1] - shadow_linear[1]) * shadow_to_base
-                t0b = shadow_linear[2] + (base_linear[2] - shadow_linear[2]) * shadow_to_base
+                if hue_lut is not None:
+                    # Shadow hue by signed N.L (SHADOW_HUE_MAX).
+                    sn = nx * ldir[0] + ny * ldir[1] + nz * ldir[2]
+                    t0r, t0g, t0b = hue_lut[int((sn + 1.0) * 0.5 * hue_last + 0.5)]
+                else:
+                    # Inline double-lerp: shadow -> base -> light.
+                    t0r = shadow_linear[0] + (base_linear[0] - shadow_linear[0]) * shadow_to_base
+                    t0g = shadow_linear[1] + (base_linear[1] - shadow_linear[1]) * shadow_to_base
+                    t0b = shadow_linear[2] + (base_linear[2] - shadow_linear[2]) * shadow_to_base
                 tcr = t0r + (light_linear[0] - t0r) * base_to_light
                 tcg = t0g + (light_linear[1] - t0g) * base_to_light
                 tcb = t0b + (light_linear[2] - t0b) * base_to_light
                 de = illuminance * ndl
-                direct_factor = (2.0 * de) / (1.0 + de) if de > 0.0 else 0.0
+                gde = diffuse_gain * de
+                direct_factor = diffuse_k * de / (1.0 + gde) if de > 0.0 else 0.0
                 # Inline smoothstep(0, 0.55, ndl).
                 st = ndl / 0.55
                 if st < 0.0:
@@ -1034,29 +1292,64 @@ class ColorEngine:
                 atg = shadow_linear[1] + (ambient_linear[1] - shadow_linear[1]) * 0.35
                 atb = shadow_linear[2] + (ambient_linear[2] - shadow_linear[2]) * 0.35
 
-                body_factor = direct_factor
-                if body_factor < diffuse_floor:
-                    body_factor = diffuse_floor
+                if floor_soft > 0.0:
+                    # Smooth maximum of the diffuse term and the floor.
+                    gap = direct_factor - diffuse_floor
+                    h = floor_soft - (gap if gap > 0.0 else -gap)
+                    body_factor = direct_factor if gap > 0.0 else diffuse_floor
+                    if h > 0.0:
+                        body_factor += h * h * 0.25 / floor_soft
+                else:
+                    body_factor = direct_factor
+                    if body_factor < diffuse_floor:
+                        body_factor = diffuse_floor
                 mix = ambient_factor * ambient_sky_mix
                 br = tcr * body_factor + atr * mix
                 bg = tcg * body_factor + atg * mix
                 bb = tcb * body_factor + atb * mix
                 sk = ambient_factor * 0.05
-                br += sky_linear[0] * sk
-                bg += sky_linear[1] * sk
-                bb += sky_linear[2] * sk
+                if env_k > 0.0:
+                    # Environment light takes the surface's colour (ENV_ALBEDO).
+                    er = 1.0 - env_k + env_k * tcr
+                    eg = 1.0 - env_k + env_k * tcg
+                    eb = 1.0 - env_k + env_k * tcb
+                else:
+                    er = eg = eb = 1.0
+                br += sky_linear[0] * sk * er
+                bg += sky_linear[1] * sk * eg
+                bb += sky_linear[2] * sk * eb
+                if reflect_k > 0.0:
+                    # Shadow side only, rising toward the silhouette, and
+                    # (with REFLECT_SPREAD) on the side facing away from the
+                    # light in the picture plane.
+                    edge = 1.0 - (nz if nz > 0.0 else 0.0)
+                    if reflect_span > 0.0:
+                        rt = (edge - reflect_a) / reflect_span
+                        rt = 0.0 if rt < 0.0 else (1.0 if rt > 1.0 else rt)
+                        rk = reflect_k * shadow_factor * rt * rt * (3.0 - 2.0 * rt)
+                    else:
+                        rk = reflect_k * shadow_factor * edge ** reflect_p
+                    if reflect_s > 0.0:
+                        lxy = math.hypot(ldir[0], ldir[1])
+                        nxy = math.hypot(nx, ny)
+                        if lxy > 1e-6 and nxy > 1e-6:
+                            away = -(nx * ldir[0] + ny * ldir[1]) / (lxy * nxy)
+                            rk *= (away if away > 0.0 else 0.0) ** reflect_s
+                    br += base_linear[0] * rk
+                    bg += base_linear[1] * rk
+                    bb += base_linear[2] * rk
                 yn = -ny
                 if yn < 0.0:
                     yn = 0.0
                 yp = ny
                 if yp < 0.0:
                     yp = 0.0
-                br += sky_linear[0] * yn * sky_b
-                bg += sky_linear[1] * yn * sky_b
-                bb += sky_linear[2] * yn * sky_b
-                br += ground_linear[0] * yp * ground_b
-                bg += ground_linear[1] * yp * ground_b
-                bb += ground_linear[2] * yp * ground_b
+                br += sky_linear[0] * yn * sky_b * er
+                bg += sky_linear[1] * yn * sky_b * eg
+                bb += sky_linear[2] * yn * sky_b * eb
+                br += ground_linear[0] * yp * ground_b * er
+                bg += ground_linear[1] * yp * ground_b * eg
+                bb += ground_linear[2] * yp * ground_b * eb
                 body = (br, bg, bb)
 
                 hx, hy, hz = self._light_half[row][col]
@@ -1067,7 +1360,7 @@ class ColorEngine:
                 i1 = spec_last if i0 >= spec_last else i0 + 1
                 spec_pow = spec_lut[i0] + (spec_lut[i1] - spec_lut[i0]) * (spec_pos - i0)
                 spec_term = illuminance * ndl * spec_pow * knee_curve
-                spec_term *= spec_max
+                spec_term *= spec_max * spec_gain
                 spec_term = self._clamp(spec_term, 0.0, 4.0)
                 body = self._add(body, self._mul(highlight_linear, spec_term))
 
@@ -1144,7 +1437,7 @@ class ColorEngine:
         shadow_linear = self._to_linear(self.shadow_color)
         light_linear = self._to_linear(self.light_color)
         ambient_linear = self._to_linear(self.ambient_color)
-        highlight_linear = self._to_linear(self.highlight_color)
+        highlight_linear = self._to_linear(self._effective_highlight(base_srgb))
         sky_linear = self._to_linear(self.AMBIENT_SKY)
         ground_linear = self._to_linear(self.GROUND_COLOR)
 
@@ -1173,14 +1466,20 @@ class ColorEngine:
         rim_sky_mix = self.rim_sky_mix
         glow_on = self.glow_intensity > 0.0
         glow_intensity = self.glow_intensity
+        glow_gain = self.GLOW_GAIN
         glow_power = max(1.0, self.glow_radius / 4.0)
         rim_k = rim_light
         # rim tint is constant across the sphere for a render.
         rim_color = self._lerp(light_linear, sky_linear, rim_sky_mix)
 
         output_linear: List[List[Color]] = []
+        shoulder = self.TONE_SHOULDER
+        span = 1.0 - shoulder
+        inv_span = 1.0 / span
+        exp = math.exp
 
         for row in range(height):
+            self._check_cancel()
             out_row: List[Color] = []
             mrow = self._mask_grid[row]
             nrm_row = self._normal_grid[row]
@@ -1247,19 +1546,20 @@ class ColorEngine:
                     g = 1.0 - nv
                     glow = (g ** glow_power) * ndl * glow_intensity
                     if glow != 0.0:
-                        gk = glow * 0.18
+                        gk = glow * glow_gain
                         body = (body[0] + highlight_linear[0] * gk,
                                 body[1] + highlight_linear[1] * gk,
                                 body[2] + highlight_linear[2] * gk)
 
-                # Inline Reinhard (final safety net, no call overhead).
+                # Inline display roll-off (see TONE_SHOULDER): identity up to
+                # the shoulder, exponential ease to 1 above it.
                 b0 = body[0]
                 b1 = body[1]
                 b2 = body[2]
                 out_row.append((
-                    b0 / (1.0 + b0) if b0 > 0.0 else 0.0,
-                    b1 / (1.0 + b1) if b1 > 0.0 else 0.0,
-                    b2 / (1.0 + b2) if b2 > 0.0 else 0.0,
+                    (b0 if b0 <= shoulder else shoulder + span * (1.0 - exp(-(b0 - shoulder) * inv_span))) if b0 > 0.0 else 0.0,
+                    (b1 if b1 <= shoulder else shoulder + span * (1.0 - exp(-(b1 - shoulder) * inv_span))) if b1 > 0.0 else 0.0,
+                    (b2 if b2 <= shoulder else shoulder + span * (1.0 - exp(-(b2 - shoulder) * inv_span))) if b2 > 0.0 else 0.0,
                 ))
 
             output_linear.append(out_row)
@@ -1277,7 +1577,9 @@ class ColorEngine:
         pixels: List[List[Pixel]] = []
         srgb_lut = self._srgb_lut()
         srgb_last = len(srgb_lut) - 1
+        t_srgb = time.perf_counter()
         for row in range(height):
+            self._check_cancel()
             prow: List[Pixel] = []
             for col in range(width):
                 if not self._mask_grid[row][col]:
@@ -1290,6 +1592,7 @@ class ColorEngine:
                     int(srgb_lut[int(max(0.0, min(1.0, lin[2])) * srgb_last + 0.5)] * 255.0 + 0.5),
                 ))
             pixels.append(prow)
+        self._record_timing("srgb", (time.perf_counter() - t_srgb) * 1000.0)
         total_ms = (time.perf_counter() - t_total) * 1000.0
         self._record_timing("total", total_ms)
         self._log_timings(width, height, total_ms)
@@ -1320,6 +1623,7 @@ class ColorEngine:
         ]
 
         for row in range(height):
+            self._check_cancel()
             hrow_out = horizontal[row]
             mrow = mask[row]
             grow = grid[row]
@@ -1348,6 +1652,7 @@ class ColorEngine:
             [(0.0, 0.0, 0.0) for _ in range(width)] for _ in range(height)
         ]
         for row in range(height):
+            self._check_cancel()
             rrow_out = result[row]
             for col in range(width):
                 if not mask[row][col]:

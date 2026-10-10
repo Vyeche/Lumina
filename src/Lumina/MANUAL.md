@@ -41,32 +41,66 @@ The core rule of this tool:
 | Control | What it does |
 |---|---|
 | **Gear** (left) | Opens **Settings**: light direction, render quality, sampler toggle, and *Reset all*. Lights up while the popup is open. |
-| **Left color block** | The **original** color. Click it to revert the active color back to it. |
-| **Right color block** | The **active** color — what you are editing or what you last picked. Click it to commit it as the new original. |
+| **Left color block** (*Before*) | The **original** color. Click it to revert the active color back to it. |
+| **Right color block** (*Now*) | The **active** color — what you are editing or what you last picked. Click it to commit it as the new original. |
 | **Eyedropper** (right) | Activates Krita's **Color Sampler** tool so you can click any pixel on the canvas. Lights up while the sampler is active. |
 
 The two color blocks are a *split color preview*: the left never changes on its
-own, and the right always shows the color currently in play. They only diverge
+own, and the right always shows the selected target (shade, base or highlight), the same color as the hex box under it. They only diverge
 while you are editing.
 
 Under each block sits its **hex value**. Click a hex value to copy it to the
-clipboard. The **EDIT** button tucked against the current hash unlocks typing
-(green **DONE** while open): type a new hex color into the current box and
-press Enter — the full lighting set is derived from it, like eyedropping.
+clipboard. The current box shows the **selected target** (shadow, base or
+highlight), and the toggle beside it names it — **EDIT SHADE**, **EDIT BASE** or
+**EDIT HIGH**. It unlocks typing (green **DONE** while open): type a hex color and
+press Enter. For the base, the light and shadow are derived from it, like
+eyedropping; a shadow or highlight takes the color exactly as typed.
 The previous box is display plus copy only. The
 lock state is saved with your settings.
 
-### The Sphere
+### What changes the sphere's colours
 
-A sphere lit by the three target colors. **Drag the color sampler** — the small
-ring that follows your pointer — to read the color under it; its centre always
-shows the exact color being sampled, and the RGB value appears underneath.
+**A target changes** (and with it the sphere) in three ways:
+
+- **Typing a hex** into the box under the active swatch: it edits the selected
+  target — the toggle reads **EDIT SHADE**, **EDIT BASE** or **EDIT HIGH**.
+- **Krita's colour** — an eyedropper pick or any change in Krita's colour
+  selectors replaces the selected target, like a switch.
+- **The Hue and Saturation sliders** edit the selected target (Light edits the
+  base only).
+
+**After a target changes**, the Hue and Saturation sliders move to the new colour
+(and Light, when the base is selected), the hex box shows it, and the target's
+dot and the sphere redraw.
+
+When Krita's colour replaces a target, the line under the target dots says so
+for a moment (for example *Base ← Krita colour #ab9b7c*). While you are pressing
+or dragging on the sphere, Krita's colour changes are Lumina's own picks coming
+back and are never taken as a new target.
+
+**Nothing else changes a target.** Clicking or dragging the sphere only sets
+Krita's brush colour for painting, whichever target is selected — except a
+**Shift-click**, which makes the color under it the selected target's, like typing
+its hex. Presets and the Advanced lighting sliders change how the sphere is lit,
+never its three colours.
+
+### The sphere
+
+A sphere lit by the three target colors. It grows with the panel, from 200 up
+to 340 px. **The color sampler** is a lemon that rests on the sphere under your
+pointer (the pointer itself hides while it is there). It lies along the curve,
+is filled with the exact color being read, and shows that color's hex in a pill
+beneath it; under the target dots it reads as **H / S / L** in the sliders' own units. A click makes it pop;
+while you hold the button it stays a little larger, and if you hold on long
+enough it starts to sweat (a faint ring fills round it while you wait).
 
 - **Hover** to preview a color.
 - **Click or drag** to choose that color **for drawing**. This sets Krita's
   foreground (brush) color so you can paint with it. The sphere itself does not
   change.
-- Picks only register **on the sphere** — the corners outside the disc are ignored.
+- **Shift-click** to make the color the **selected target's** instead (once — a Shift-drag only moves the sampler). A base derives light and shadow around it; a shade or highlight takes it exactly.
+- **Arrow keys** nudge the sampler 1 px (Shift: 5 px) for a precise pick; **Enter** or **Space** picks there. Click the sphere first so it has the keyboard.
+- Picks register **on the sphere**, and keep going a little past its edge (the **Sticky distance** in Settings, 40 px by default), gliding round the rim. Further out they stop.
 
 ### The lamp
 
@@ -89,13 +123,20 @@ Below the sphere, three small icons pick which color the Hue and Saturation slid
 | **Plain ring** | **Base** — the color of the object. |
 | **Ring with rays** | **Light** — the highlight color; also drives how bright the lit side gets. |
 
-The selected target shows on its **color swatch** beside the icon, which grows slightly and takes a white rim. The icons themselves never change.
+Each pair is captioned **Shade**, **Base** or **High**. The selected target shows on its **color swatch** beside the icon, which grows and takes a white rim, and its caption lights up; selecting one sparkles. The icons themselves never change.
+
+The arrows at the two ends of the row **undo** and **redo** changes to the three
+target colors (up to 50 steps; a whole slider drag counts as one). Undo never
+touches the brush color.
 
 ### Sliders
 
 Every slider shows its value at the right end. Clicking a slider's track
 jumps the knob to the click (then keep holding to drag); grabbing the knob
-itself drags relatively from its current value.
+itself drags relatively from its current value. Letting go sends a soft ripple
+out from the knob, in the colour under it; hold one too long and the knob
+starts to sweat. The mouse wheel and arrow keys step a slider quietly, without
+either.
 
 #### Typing values
 
@@ -109,11 +150,19 @@ half-typed text.
 
 | Slider | Range | What it does |
 |---|---|---|
-| **Hue** | 0–359 | Changes the hue of the **selected target**. Fixed rainbow track. |
-| **Saturation** | 0–100 | Changes the saturation of the selected target. The track re-renders as grey → full color at the current hue. |
-| **Light** | 0–100 | Brightness of the **base** target only; hidden for shadow and light, which are derived from the base. |
+| **Hue** | 0–359 | Perceptual hue (OKLCH degrees) of the **selected target**, like the reference lighting app's: equal steps look equally different. Fixed full-strength rainbow track: each hue at its most vivid color, like Krita's hue strip. |
+| **Saturation** | 0–100 | Vividness of the selected target: 100 is the most vivid color the gamut holds at that hue and lightness. The track re-renders as grey → full color at the current hue. |
+| **Light** | 0–100 | Perceived lightness of the **base** target only; hidden for shadow and light, which are derived from the base. |
 | **Contrast** | 0–200, default 100 (middle) | Tonal separation around the midtone. Above 100 deepens it, below 100 softens it; pure black and white are always preserved. It does **not** change a color. |
 | **Intensity** (primary) | 0–200, default 100 | Scene light level: scales Sun, Point, Spot and Area together. Mirrors the Advanced **Intensity** row — one value, two handles. |
+
+### Recent picks
+
+Under the sliders, the last 10 colors you picked on the sphere, newest first.
+**Click** one to make it the brush color again, **double-click** to make it the
+selected target's color, **right-click** to **pin** or **remove** it. Pinned
+colors sit first with a small white dot and are never pushed out by new picks;
+**Clear** empties the rest. Saved with your settings.
 
 ### Advanced (collapsed)
 
@@ -129,15 +178,15 @@ not fit, so nothing spills out over the dockers below it:
 | **Diffuse** | Softness of the highlight's falloff. High spreads it into a wide, gentle sheen; low keeps it a compact bright spot. Pairs with **Specular**: that sets how wide the highlight is, this sets how softly it fades. |
 | **Glow** | Bloom on the lit areas. |
 | **Tone** | Global saturation of the rendered result. |
-| **Rim** | 0–30%, default 14%. Edge accent strength — not a second key light. |
+| **Rim** | 0–30%, default 10%. Edge accent strength — not a second key light. The glow on the shadow-side edge opposite the light is reflected light, built in and in the surface's own colour. |
 | **Rim Tint** | 0–100%, default 60%. Blends the rim from the key color toward sky color. |
-| **Sky** | 0–10%, default 5%. Cool bounce from above in the shadows. |
-| **Ground** | 0–5%, default 2%. Warm bounce from below in the shadows. |
+| **Sky** | 0–10%, default 2%. Cool bounce from above in the shadows. |
+| **Ground** | 0–5%, default 1%. Warm bounce from below in the shadows. |
 | **Mixer** | How the light components blend: **Blended**, **Additive** or **Multiplicative**. |
 
 ### Presets
 
-One-click looks flanking the orb, three per side. Each sets the highlight color,
+One-click looks flanking the sphere, three per side. Each sets the highlight color,
 lighting sliders and mixer mode together (never the target colors):
 
 | Button | What it does |
@@ -149,44 +198,67 @@ lighting sliders and mixer mode together (never the target colors):
 | **Matte** | Even clay-like falloff, no specular hotspot. |
 | **Neon** | Saturated and blooming, coloured light. |
 
+A preset stays lit while the lighting still matches it — picking or editing
+colors does not switch it off. **Click it again to turn it off**: the lighting
+you had before switching it on comes back (hopping between presets keeps that
+original). Moving a lighting slider makes your edit the new starting point. The
+lit preset, and what it restores, are remembered across restarts.
+
 ---
 
 ## Picking a color from your artwork
 
-Press the **eyedropper**, then click any pixel on the canvas. The sampled color
-becomes the **base**, and the rest of the lighting is derived around it so the
-three always blend:
+Press the **eyedropper**, then click any pixel on the canvas. What happens next
+depends on which **target dot** is selected:
 
-- **Light** — the base lifted **45% of the way toward white**, less saturated, and
-  its hue moved slightly **toward the key light's hue** (a warm 29°).
-- **Shadow** — the base taken down to **42% of its value**, slightly *muted*, and
-  its hue moved slightly **toward the ambient's hue** — the complement of the key
-  light, a cool 209°.
+- **Base selected** — the sampled color becomes the base, and the light and
+  shadow are derived around it (below) so the three always blend.
+- **Shadow or light selected** — the sampled color replaces *only that target*,
+  exactly as picked. The other two are left alone, so you can sample a real
+  highlight and a real shadow straight off a reference.
 
-Near magenta and red the moves are stronger and saturation is kept or boosted
-rather than muted, so a mauve base derives a violet shadow and a terracotta
-light; green, blue, and grey derive exactly as described above.
+When the base is selected, the derivation is:
 
-This is the standard hue-shifting rule: lit surfaces take the hue of the light,
-shadowed ones the hue of the ambient fill. Both are expressed as a *target hue*
-rather than a fixed offset, because "warmer" has no single direction around the
-color wheel — from a blue base, warmer is a *decreasing* hue, while from a red
-base it is an *increasing* one. A fixed sign therefore inverts the pair for
-everything between cyan and magenta, giving a cool highlight and a warm shadow.
-Targeting the light and its complement keeps the direction right from anywhere
-on the wheel. Both shifts are small and scale with the base's saturation, because
-a large shift is not just a bigger version of a small one: a base sitting near the
-ambient's antipode sends even a modest shift clean across the wheel, which turned
-an orange into an olive-green shadow. Real shadows mostly darken and desaturate
-rather than rotate in hue.
+- **Light** — a fixed step **lighter** than the base, with its hue swung toward a
+  **warm key light** (about 37°, a peach-orange): blues turn magenta-lilac, greens
+  turn cream, reds turn peach.
+- **Shadow** — a fixed step **darker** than the base, leaning toward a **cool
+  ambient** (about 260°): greens go teal, magentas go violet. Reds, oranges and
+  yellows keep **warm shadows**, and blues are already there.
 
-Value and saturation shifts are proportional to the headroom for the same reason:
-a flat "+20% value" clipped outright on any color already brighter than 80%, and a
-flat "−30%" drove dark colors to black.
+The steps are measured in *perceived* lightness (OKLCH), so a bright pick and a
+dark one move by the same visible amount — the old rule scaled brightness, so
+bright picks barely moved and dark ones collapsed. The model was fitted to a
+reference lighting app's own shadow and light for several bases, and is checked
+against them by `tools/reference_calibration.py`.
+
+A grey derives greys, black derives black, and a very dark pick still gets a
+shadow you can tell apart from it. Colors that would fall outside the RGB range
+lose chroma rather than shifting hue.
 
 Your tool is returned to whatever you were using, and the eyedropper stays armed,
 so you can keep sampling. This also works if you pick with Krita's own Color
 Sampler, the palette, or the Color Selector docker.
+
+### Colors match Krita's, on every layer
+
+Whatever sets Krita's color — the eyedropper, the Specific or Advanced Color
+Selector, a palette — Lumina takes **exactly that color** and never changes
+Krita's color back.
+
+Lumina shows numbers the same way Krita's **Specific Color Selector** does: in
+the **active layer's color space**. That matters for imported photos and
+screenshots, which often keep their own profile (iPhone and Mac screenshots are
+*Display P3*). The same blue reads `#0102bd` on an sRGB layer and `#0102b5` on a
+Display P3 layer — in Krita's selector *and* in Lumina. Switching layers changes
+the numbers, never the colors, and is not treated as a new pick.
+
+The sphere and swatches are always drawn in the right colors on screen, whatever
+the layer.
+
+> If the numbers in Krita's selector and Lumina ever disagree, check the
+> selector's **Lock to current layer colorspace** button (on by default). With it
+> off, the selector shows a space of its own choosing instead of the layer's.
 
 ---
 
@@ -194,11 +266,13 @@ Sampler, the palette, or the Color Selector docker.
 
 | Setting | What it does |
 |---|---|
-| **Light azimuth** | Rotates the main light around the sphere, 0–359° (default 287°). |
-| **Light height** | Raises and lowers the light, 0–90° (default 45°). |
-| **Highlight size** | Highlight size on the orb, 0–100 (default 80). Up means a bigger, softer highlight. Drives the same sharpness as the Advanced **Specular** row, so the two stay in sync. |
+| **Light azimuth** | Rotates the main light around the sphere, 0–359° (default 304°, where the reference lighting app puts its light). |
+| **Light height** | Raises and lowers the light, 0–90° (default 41°). |
+| **Highlight size** | Highlight size on the sphere, 0–100 (default 99, the broad sheen the reference lighting app shows). Up means a bigger, softer highlight. Drives the same sharpness as the Advanced **Specular** row, so the two stay in sync. |
 | **Quality** | Render grid size. *Low* is smoothest while dragging, *High* is finest. |
-| **Show color cursor** | Show or hide the ring that follows the pointer over the orb. It marks the exact pixel being read and previews that color; it does not magnify. |
+| **Show color cursor** | Show or hide the lemon sampler that rests under the pointer on the sphere. It marks the exact pixel being read and previews that color; it does not magnify. With it off the normal pointer stays. |
+| **Sticky distance** | How far past the sphere's edge picking keeps hold, 0–100 px (default 40). |
+| **Compact panel** | Hides the captions (presets, lamps, targets, Before / Now) and Recent picks; the icons and their tooltips stay. |
 | **Use base color as brush** | Sends the **base color** to Krita's foreground. Use it after editing with the sliders, since slider edits do not touch the brush. |
 | **Reset all** | Restores every color and lighting value to its default, and saves that reset. |
 | **Save settings** | Writes your current setup to disk. Changes already save as you make them, so this is a checkpoint — it confirms the write rather than being the only chance to keep your work. |

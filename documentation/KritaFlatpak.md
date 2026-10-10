@@ -13,7 +13,7 @@ document links here rather than repeating the commands.
     ├── color_engine.py        ← pure-Python shading (no Qt)
     ├── color_processor.py     ← Krita-facing adapter
     ├── color_controls.py      ← control widgets
-    ├── sphere_widget.py       ← orb surface + picking
+    ├── sphere_widget.py       ← sphere surface + picking
     ├── sphere_docker.py       ← main docker
     └── MANUAL.html            ← shown under Help → Plugin Help
 ```
@@ -28,7 +28,7 @@ From the repository root:
 
 ```bash
 DEPLOY="$HOME/.var/app/org.kde.krita/data/krita/pykrita"
-rsync -a --delete --exclude='__pycache__' src/Lumina/ "$DEPLOY/Lumina/"
+rsync -a --delete --exclude='__pycache__' --exclude='lumina_log.txt' src/Lumina/ "$DEPLOY/Lumina/"
 cp src/Lumina.desktop "$DEPLOY/"
 ```
 
@@ -38,6 +38,7 @@ Three details that matter:
 |---|---|
 | `--delete` | Removes files deleted from source instead of leaving stale modules in the deploy dir. |
 | `--exclude='__pycache__'` | Without it, host Python (3.12) bytecode is copied into the deploy dir next to Krita's own (3.13). Harmless but confusing; it also means the file you inspect may not be the one Krita runs. |
+| `--exclude='lumina_log.txt'` | Running the tests writes their own `src/Lumina/lumina_log.txt`. Without the exclude, every deploy copies it over Krita's log and the record of what happened in Krita is lost. |
 | `.desktop` at root | The plugin will not register if it sits inside the package dir. |
 
 ### One-time cleanup after the rename
@@ -120,7 +121,7 @@ it is valid 3.13 bytecode matching current source.
 
 1. **View → Dock Widgets → Lumina** — the panel appears.
 2. The terminal shows no `ImportError` or `NameError`.
-3. The orb renders shaded, and the highlight reads as a soft sheen rather than a
+3. The sphere renders shaded, and the highlight reads as a soft sheen rather than a
    hard-edged disc.
 
 

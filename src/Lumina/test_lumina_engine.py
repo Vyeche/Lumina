@@ -66,9 +66,11 @@ def test_spec_knee_is_clamped_to_0_02_0_95():
     assert e.spec_knee == 0.02
 
 
-def test_spec_max_default_is_0_24():
+def test_spec_max_default_is_0_61():
+    # 0.24, then 0.27 with the reference calibration; 0.61 since #45, when
+    # the lobe moved toward the light and broadened to match the reference.
     mod = load_engine()
     e = mod.ColorEngine(resolution=32)
-    assert abs(float(getattr(e, "spec_max", e.SPEC_MAX)) - 0.24) < 1e-9
+    assert abs(float(getattr(e, "spec_max", e.SPEC_MAX)) - 0.61) < 1e-9
     e.set_spec_max(0.28)
     assert abs(e.spec_max - 0.28) < 1e-9

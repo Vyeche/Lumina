@@ -37,3 +37,12 @@ lumina_log.txt
 # written here and posted by hand; a half-finished draft in the public repo
 # could be read out of context or posted by someone else.
 documentation/announcements/
+
+# Private reference tester and its backups (our calibration file, never publish).
+Sphere UI and Color Rim Shadow Highlight Ref Tester*.kra
+# ...and Krita's hidden autosaves of it (and of any document).
+.Sphere UI and Color Rim Shadow Highlight Ref Tester*
+*.kra-autosave.kra
+
+# Krita backup files
+*.kra~

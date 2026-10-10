@@ -13,20 +13,58 @@ Responsibilities:
 import math
 from typing import Callable, Optional
 
-from PyQt5.QtCore import Qt, QPoint, QPointF, QRectF
-from PyQt5.QtGui import QColor, QPainter, QFont, QPixmap, QImage, QPen
-from PyQt5.QtWidgets import QWidget
+from PyQt5.QtCore import Qt, QEvent, QObject, QPoint, QPointF, QRectF, QTimer
+from PyQt5.QtGui import QColor, QCursor, QPainter, QFont, QPixmap, QImage, QPen
+from PyQt5.QtWidgets import QApplication, QWidget
 
 # How far past the silhouette a pick still works, in widget pixels. Inside this
 # band the sample point is projected onto the circle, letting the cursor glide
-# around the rim; past it, picking stops. Kept small so the transparent corners
-# of the square around the orb stay genuinely unpickable.
-EDGE_GLIDE = 32.0
+# around the rim; past it, picking stops. 40 (was 32): the pick held on so
+# briefly that a drag along the edge kept letting go. This is the default;
+# Settings > Sticky distance sets it per user (SphereWidget.edge_glide). The band reaches
+# past the widget's own bounds -- a drag keeps the mouse, and a hover is
+# followed by _OutsideTracker -- so it is the same width all the way round.
+EDGE_GLIDE = 40.0
 
-# Inset between the widget edge and the drawn orb, in pixels. Must exceed
-# EDGE_GLIDE, otherwise the circle touches the widget bounds and the glide band
-# is unreachable at the four points where they meet.
-ORB_MARGIN = 20.0
+
+class _OutsideTracker(QObject):
+    """Follows the pointer after it leaves the sphere widget while the sampler
+    is still in the edge band. Hover moves are only delivered to the widget
+    under the pointer, and the widget ends 20 px past the sphere at the top,
+    bottom and sides, so without this the sampler vanished there however wide
+    EDGE_GLIDE was. Watches application mouse moves only while it is needed
+    (never consumes them) and hands back to the widget on re-entry."""
+
+    def __init__(self, sphere):
+        super().__init__(sphere)
+        self._sphere = sphere
+        self.active = False
+
+    def start(self) -> None:
+        if not self.active:
+            self.active = True
+            QApplication.instance().installEventFilter(self)
+            QApplication.setOverrideCursor(Qt.BlankCursor)
+
+    def stop(self) -> None:
+        if self.active:
+            self.active = False
+            QApplication.instance().removeEventFilter(self)
+            QApplication.restoreOverrideCursor()
+
+    def eventFilter(self, obj, event):
+        try:
+            if event.type() == QEvent.MouseMove and self.active:
+                self._sphere._follow_outside(self._sphere._cursor_local())
+        except Exception:  # pragma: no cover - never break input
+            LOG.exception("_OutsideTracker failed")
+            self.stop()
+        return False
+
+# Inset between the widget edge and the drawn sphere, in pixels. Hovering
+# (no button) only reaches this far past the silhouette at the four points
+# where the circle is nearest the widget bounds; a drag reaches EDGE_GLIDE.
+SPHERE_MARGIN = 20.0
 
 # ---------------------------------------------------------------------------
 # Logging — shared setup in lumina_logging (file handler never holds the
@@ -49,6 +87,12 @@ class SphereWidget(QWidget):
         self._show_pointer = True     # settings toggle for the marker
         self._last_pos = None         # last cursor position, for release-commit
         self._preview = None          # floating colour preview that tracks cursor
+        self._mouse_hidden = False    # mouse pointer hidden while the sampler shows
+        self._outside = _OutsideTracker(self)   # hover past the widget's bounds
+        self.edge_glide = EDGE_GLIDE  # how far past the rim a pick holds, px
+        self._target_cb = None        # Shift-click: pick into the selected target
+        self._shift_pick = False      # this press was a Shift-click
+        self._key_pos = None          # arrow-key nudge position, widget coords
         self.setFixedSize(200, 200)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMouseTracking(True)
@@ -69,12 +113,22 @@ class SphereWidget(QWidget):
         """
         self._brush_cb = callback
 
+    def set_target_callback(self, callback: Optional[Callable[[QColor], None]]):
+        """Register a callback for Shift-click: the one way a sphere click
+        sets the selected target instead of the brush."""
+        self._target_cb = callback
+
     def set_hover_callback(self, callback: Optional[Callable[[QColor], None]]):
         """Register a callback fired when the cursor moves over the sphere."""
         self._hover_cb = callback
 
+    def set_edge_glide(self, pixels: float) -> None:
+        """How far past the sphere's edge a pick holds on (Settings >
+        Sticky distance), in widget pixels. 0 lets go at the silhouette."""
+        self.edge_glide = max(0.0, float(pixels))
+
     def set_show_pointer(self, show: bool) -> None:
-        """Toggle the on-orb sampling markers.
+        """Toggle the on-sphere sampling markers.
 
         This governs both markers, because they are one feature: the small
         pointer ring painted by :meth:`paintEvent` and the larger sampling ring
@@ -85,10 +139,11 @@ class SphereWidget(QWidget):
         if self._preview is not None:
             if not show:
                 # Otherwise the ring lingers on screen until the pointer next
-                # leaves the orb, which reads as the toggle having failed.
+                # leaves the sphere, which reads as the toggle having failed.
                 self._preview.hide()
+                self._hide_mouse(False)
             elif self._pointer is not None:
-                # Re-show straight away if the pointer is already over the orb.
+                # Re-show straight away if the pointer is already over the sphere.
                 # Showing is otherwise driven by pointer motion, so switching it
                 # back on appeared to do nothing until the mouse moved.
                 self._reposition_preview()
@@ -97,7 +152,7 @@ class SphereWidget(QWidget):
     def set_preview_widget(self, widget) -> None:
         """Attach a floating preview (the colour sampler ring) tracking the cursor.
 
-        The preview follows the pointer across the orb and is hidden again when
+        The preview follows the pointer across the sphere and is hidden again when
         the cursor leaves the sphere, instead of sitting in a fixed corner.
         """
         self._preview = widget
@@ -105,11 +160,25 @@ class SphereWidget(QWidget):
             widget.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             widget.hide()
 
+    def _hide_mouse(self, hide: bool) -> None:
+        """Hide the mouse pointer while the sampler is on the sphere -- the
+        sampler marks the spot, and the arrow on top of it only hid the colour
+        -- and bring it back whenever the sampler is not showing (off the
+        sphere, or switched off in settings, when nothing else would mark it)."""
+        hide = bool(hide)
+        if hide == self._mouse_hidden:
+            return
+        self._mouse_hidden = hide
+        if hide:
+            self.setCursor(Qt.BlankCursor)
+        else:
+            self.unsetCursor()
+
     def _reposition_preview(self) -> None:
         """Centre the sampler on the pointer, in its parent's coordinates.
 
-        The sampler is parented to the panel rather than the orb so it is not
-        clipped by the orb's bounds. Clamping it to stay inside the orb made it
+        The sampler is parented to the panel rather than the sphere so it is not
+        clipped by the sphere's bounds. Clamping it to stay inside the sphere made it
         visibly lag behind the pointer around the edges, so the reticle could
         never actually reach the rim of the sphere.
 
@@ -122,13 +191,22 @@ class SphereWidget(QWidget):
             return
         if not self._show_pointer:
             preview.hide()
+            self._hide_mouse(False)
             return
+        # Tell the sampler where on the surface it sits, so it lies on the curve.
+        if hasattr(preview, "set_surface"):
+            off_x, off_y, dia = self._sphere_geometry()
+            preview.set_surface((self._pointer.x() - off_x) / dia * 2.0 - 1.0,
+                                (self._pointer.y() - off_y) / dia * 2.0 - 1.0)
+        if hasattr(preview, "set_active"):
+            preview.set_active(self._pointer_down)
         parent = preview.parentWidget() or self
         top_left = self.mapTo(parent, QPoint(int(self._pointer.x()) - preview.width() // 2,
                                              int(self._pointer.y()) - preview.height() // 2))
         preview.move(top_left)
         preview.raise_()
         preview.show()
+        self._hide_mouse(True)
 
 
     def hovered_color(self) -> Optional[QColor]:
@@ -139,9 +217,10 @@ class SphereWidget(QWidget):
         try:
             painter = QPainter(self)
             painter.setRenderHint(QPainter.Antialiasing, True)
-            # Also smooth the *image* scaling. The orb is drawn at whatever size
+            # Also smooth the *image* scaling. The sphere is drawn at whatever size
             # the render resolution allows, which is not always the widget size:
-            # the drag path renders at 128px and upscales into a 200px widget, and
+            # the drag path renders at 96px (DRAG_RENDER) and upscales into a
+            # 200px widget, and
             # a HiDPI or resized docker scales it too. Without this hint the
             # upscale is nearest-neighbour and the rim turns blocky during drags.
             painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
@@ -156,7 +235,7 @@ class SphereWidget(QWidget):
             if not res:
                 painter.end()
                 return
-            off_x, off_y, dia = self._orb_geometry()
+            off_x, off_y, dia = self._sphere_geometry()
 
             # Scale the *whole* image into a centered square: a complete circle is
             # always shown regardless of widget/image size mismatch or HiDPI,
@@ -169,7 +248,7 @@ class SphereWidget(QWidget):
             # round dark spheres.
 
             # Picker pointer: a small ring marking the last sampled/picked point
-            # on the orb surface (the reference shows this draggable marker).
+            # on the sphere surface (the reference shows this draggable marker).
             if self._pointer is not None and self._show_pointer:
                 px, py = self._pointer.x(), self._pointer.y()
                 painter.setBrush(Qt.NoBrush)
@@ -195,21 +274,31 @@ class SphereWidget(QWidget):
             LOG.info("mousePressEvent")
             self._pointer_down = True
             self._last_pos = event.pos()
-            # A plain click (press and release with no movement) must still choose
-            # the colour under the pointer for drawing, so send to the brush on
-            # press as well as during the drag.
-            self._sample(event.pos(), "brush")
+            self._key_pos = None
+            # Shift-click picks into the selected target, once. A plain click
+            # (press and release with no movement) chooses the colour under
+            # the pointer for drawing, so it goes to the brush on press as
+            # well as during the drag.
+            self._shift_pick = bool(event.modifiers() & Qt.ShiftModifier) and self._target_cb is not None
+            self._sample(event.pos(), "target" if self._shift_pick else "brush")
         except Exception as exc:
             LOG.exception("mousePressEvent failed")
 
     def mouseMoveEvent(self, event):
         try:
             self._last_pos = event.pos()
+            self._key_pos = None
             dragging = bool(event.buttons() & Qt.LeftButton)
             self._pointer_down = dragging
+            if dragging and self._shift_pick:
+                # A Shift-drag only moves the sampler: re-targeting on every
+                # move would re-render the sphere under the pointer and the
+                # target would run away.
+                self._sample(event.pos(), "none")
+                return
             # While dragging, stream the color under the cursor to the brush.
             # The sphere's target colors are NOT touched here: doing so would
-            # re-render the orb mid-drag, so every move would resample a
+            # re-render the sphere mid-drag, so every move would resample a
             # different color and the target would run away.
             self._sample(event.pos(), "brush" if dragging else "none")
         except Exception as exc:
@@ -218,19 +307,81 @@ class SphereWidget(QWidget):
     def mouseReleaseEvent(self, event):
         try:
             self._pointer_down = False
-            # No-op: the sphere's own colours are never changed from the orb.
+            self._shift_pick = False
+            # Let the sampler settle (and stop sweating) on release.
+            if self._preview is not None and hasattr(self._preview, "set_active"):
+                self._preview.set_active(False)
+            # No-op: the sphere's own colours are never changed from the sphere.
             # The brush was already set on press and on every move.
             self.update()
         except Exception as exc:
             LOG.exception("mouseReleaseEvent failed")
 
+    def _cursor_local(self) -> QPoint:
+        """Where the pointer is now, in this widget's coordinates."""
+        return self.mapFromGlobal(QCursor.pos())
+
+    def _follow_outside(self, local: QPoint) -> None:
+        """A pointer move outside the widget while the tracker runs."""
+        if self.rect().contains(local):
+            self._outside.stop()                    # back over the widget
+            return
+        self._sample(QPointF(local), "none")
+        if self._pointer is None:                   # past the band: let go
+            self._outside.stop()
+
+    NUDGE_KEYS = {Qt.Key_Left: (-1, 0), Qt.Key_Right: (1, 0),
+                  Qt.Key_Up: (0, -1), Qt.Key_Down: (0, 1)}
+
+    def keyPressEvent(self, event):
+        """Arrow keys nudge the sampler 1 px (Shift: 5 px) for a precise
+        pick; Enter or Space picks there, as a click would."""
+        try:
+            key = event.key()
+            if key in self.NUDGE_KEYS:
+                if self._key_pos is None:
+                    self._key_pos = QPointF(self._pointer) if self._pointer is not None \
+                        else QPointF(self.width() / 2.0, self.height() / 2.0)
+                step = 5.0 if event.modifiers() & Qt.ShiftModifier else 1.0
+                dx, dy = self.NUDGE_KEYS[key]
+                self._key_pos = QPointF(self._key_pos.x() + dx * step,
+                                        self._key_pos.y() + dy * step)
+                self._sample(self._key_pos, "none")
+                event.accept()
+                return
+            if key in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space) and self._pointer is not None:
+                where = self._key_pos if self._key_pos is not None else QPointF(self._pointer)
+                if self._preview is not None and hasattr(self._preview, "set_active"):
+                    preview = self._preview
+                    preview.set_active(True)            # the click pop...
+                    QTimer.singleShot(160, lambda: preview.set_active(False))
+                self._sample(where, "brush")
+                event.accept()
+                return
+        except Exception as exc:  # pragma: no cover - defensive
+            LOG.exception("keyPressEvent failed")
+        super().keyPressEvent(event)
+
     def leaveEvent(self, event):
         try:
+            # Still within the edge band: keep the sampler and follow the
+            # pointer outside the widget instead of dropping it at the bounds.
+            if (self._preview is not None and self._preview.isVisible()
+                    and self._show_pointer and not self._pointer_down):
+                local = self._cursor_local()
+                self._outside.start()
+                self._sample(QPointF(local), "none")
+                if self._pointer is not None:
+                    return
+                self._outside.stop()
             self._pointer_down = False
+            if self._preview is not None and hasattr(self._preview, "set_active"):
+                self._preview.set_active(False)
             self._hover_color = None
             self._pointer = None
             if self._preview is not None:
                 self._preview.hide()
+            self._hide_mouse(False)
             if self._hover_cb is not None:
                 try:
                     self._hover_cb(None)
@@ -241,11 +392,11 @@ class SphereWidget(QWidget):
             LOG.exception("leaveEvent failed")
 
     def _sample(self, point: QPointF, mode: str = "none"):
-        """Sample the orb under ``point``.
+        """Sample the sphere under ``point``.
 
-        The orb is a *brush* picker only: it never assigns a color to the
+        The sphere is a *brush* picker only: it never assigns a color to the
         sphere's own targets. Those change from the sliders, the target dots or
-        the document eyedropper -- not from clicking the orb.
+        the document eyedropper -- not from clicking the sphere.
 
         ``mode`` selects how far the sample propagates:
 
@@ -260,6 +411,7 @@ class SphereWidget(QWidget):
                 self._pointer = None
                 if self._preview is not None:
                     self._preview.hide()
+                self._hide_mouse(False)
                 self.update()
                 if self._hover_cb is not None:
                     try:
@@ -273,9 +425,9 @@ class SphereWidget(QWidget):
             return
         self._hover_color = pixel
         # Remember where the pointer is, in widget coordinates.
-        # Use the same inset orb rectangle as paintEvent, not the full widget
-        # side: the image is drawn inside side - 2*ORB_MARGIN.
-        off_x, off_y, dia = self._orb_geometry()
+        # Use the same inset sphere rectangle as paintEvent, not the full widget
+        # side: the image is drawn inside side - 2*SPHERE_MARGIN.
+        off_x, off_y, dia = self._sphere_geometry()
         res = ((self._image.width() or self._image.height())
                if self._image is not None else 0)
         if res > 0:
@@ -291,21 +443,26 @@ class SphereWidget(QWidget):
             except Exception as exc:  # pragma: no cover - defensive
                 print(f"Lumina: hover callback failed - {exc}")
         self.update()
+        if mode == "target" and self._target_cb is not None:
+            try:
+                self._target_cb(pixel)
+            except Exception as exc:  # pragma: no cover - defensive
+                LOG.exception("target callback failed")
         if mode == "brush" and self._brush_cb is not None:
             try:
                 self._brush_cb(pixel)
             except Exception as exc:  # pragma: no cover - defensive
                 print(f"Lumina: brush callback failed - {exc}")
 
-    def _orb_geometry(self):
-        """Top-left and diameter of the drawn orb, in widget coordinates.
+    def _sphere_geometry(self):
+        """Top-left and diameter of the drawn sphere, in widget coordinates.
 
         Single source of truth shared by :meth:`paintEvent` and
         :meth:`_to_sphere_coords`. They previously each recomputed the centring
         separately, which is exactly the kind of duplication that lets the thing
         you see drift away from the thing you click.
 
-        The orb is inset by :data:`ORB_MARGIN` rather than filling the widget.
+        The sphere is inset by :data:`SPHERE_MARGIN` rather than filling the widget.
         A circle drawn edge-to-edge has no room outside itself, so the glide
         band in :meth:`_to_sphere_coords` could never be reached: the widget
         bounds rejected the point first, at the four points where the circle
@@ -314,7 +471,7 @@ class SphereWidget(QWidget):
         """
         w, h = self.width(), self.height()
         side = min(w, h)
-        dia = max(1.0, side - 2.0 * ORB_MARGIN)
+        dia = max(1.0, side - 2.0 * SPHERE_MARGIN)
         return (w - dia) / 2.0, (h - dia) / 2.0, dia
 
     def _to_sphere_coords(self, point: QPointF):
@@ -327,10 +484,13 @@ class SphereWidget(QWidget):
             return None, None
         res = self._image.width() or self._image.height()
         w, h = self.width(), self.height()
-        off_x, off_y, dia = self._orb_geometry()
-        # Test against the widget, not the orb rect: the glide band deliberately
-        # reaches outside the circle, so it must not be clipped to it.
-        if not (0 <= point.x() < w and 0 <= point.y() < h):
+        off_x, off_y, dia = self._sphere_geometry()
+        # Test against the widget, not the sphere rect: the glide band deliberately
+        # reaches outside the circle, so it must not be clipped to it. A drag
+        # keeps the mouse, so while the button is held the band may also reach
+        # past the widget; the EDGE_GLIDE test below still bounds it.
+        if (not self._pointer_down and not self._outside.active
+                and not (0 <= point.x() < w and 0 <= point.y() < h)):
             return None, None
         u = (point.x() - off_x) / dia * 2.0 - 1.0
         v = (point.y() - off_y) / dia * 2.0 - 1.0
@@ -345,7 +505,7 @@ class SphereWidget(QWidget):
             # and picks up again on the way out. Beyond the band it is still a
             # dead zone, so the empty corners of the square stay unpickable.
             r = math.sqrt(r2)
-            if r - 1.0 > EDGE_GLIDE / (dia * 0.5):
+            if r - 1.0 > self.edge_glide / (dia * 0.5):
                 return None, None
             k = 1.0 / r
             u *= k
@@ -357,7 +517,7 @@ class SphereWidget(QWidget):
             # Erode the pickable disc ~2 image pixels. The outermost ring
             # carries coverage-grid antialiasing blended with the background,
             # so sampling it reports a darkened mix instead of the sphere
-            # colour -- hovering the rim read the backdrop, not the orb.
+            # colour -- hovering the rim read the backdrop, not the sphere.
             # Only the fringe band is pulled inward; interior samples are
             # untouched, and the glide projection above still lands the
             # pointer on the rim.

@@ -12,8 +12,12 @@ you which look you are reading.
 
 ![Lumina at work in Krita: a flat poster-style sunset beach on the canvas, the plugin's derived lighting sets painted as a palette strip, and the panel on the right](../images/Lumina_feature.png)
 
-Flat graphic work on the left, a smoothly shaded 3D sphere on the right, lit
+Flat graphic work on the canvas, a smoothly shaded 3D sphere in the panel, lit
 from the same key. That is the point: the same three values read either way.
+
+![Lumina in use: the lemon sampler reading colours off the sphere, picks
+collecting in Recent picks, selecting a target, sweeping the hue, and a preset
+switched on and off](../images/lumina_demo.gif)
 
 ---
 
@@ -28,7 +32,7 @@ plugins folder also works). Restart Krita afterwards.
 
 ```bash
 DEPLOY="$HOME/.var/app/org.kde.krita/data/krita/pykrita"
-rsync -a --delete --exclude='__pycache__' src/Lumina/ "$DEPLOY/Lumina/"
+rsync -a --delete --exclude='__pycache__' --exclude='lumina_log.txt' src/Lumina/ "$DEPLOY/Lumina/"
 cp src/Lumina.desktop "$DEPLOY/"
 ```
 
@@ -60,13 +64,14 @@ bottom:
 
 | Row | What it is |
 |---|---|
-| Header | Gear (settings), the **original** and **active** color blocks, eyedropper — with copyable **hex values** under the blocks and an **EDIT** toggle for typing new ones. |
+| Header | Gear (settings), the **Before** and **Now** color blocks, eyedropper — with copyable **hex values** under the blocks and an **EDIT SHADE / BASE / HIGH** toggle for typing a new color into the selected target. |
 | Lamp icons | **Point** / **Sun** / **Spot** / **Area** above the sphere. |
-| The orb | The shaded preview. Drag across it to sample a colour. |
-| Target dots + swatches | **Shadow**, **Base** and **Light** selectors; the active target's swatch grows with a white rim. |
+| The sphere | The shaded preview; it grows with the panel. The **lemon** rests on it under your pointer and shows the colour and hex under it. Click or drag to send that colour to Krita's brush. |
+| Target dots + swatches | **Shade**, **Base** and **High** selectors; the selected one's swatch grows with a white rim (and sparkles). The arrows at the ends **undo** and **redo** changes to the three colours. |
 | Hue / Saturation / Light | Edits whichever target is active. |
 | Contrast / Intensity | Light falloff and scene light level. |
-| Presets | Six one-click looks, three per side of the orb. |
+| Recent picks | The last colours you picked on the sphere — click to paint with one again, double-click to make it the selected target's, right-click to pin or remove. |
+| Presets | Six one-click looks, three per side of the sphere; click a lit one again to switch it off. |
 | Advanced | The remaining lighting sliders and settings. |
 
 Every slider shows its value at the right end — click the value to type a
@@ -74,10 +79,11 @@ number (`86` and `86%` both work on percent rows, `86`/`86°`/`86deg` on
 angle rows; Enter commits, clicking away reverts). Clicking a slider's
 track jumps the knob to the click; grabbing the knob drags relatively.
 
-Under each color block sits its **hex value** — click to copy. The **EDIT**
-toggle next to the active hash unlocks typing: type a new hex into the
-active box and press Enter, and the full lighting set is derived from it
-(eyedropper-style). The previous box stays display-only.
+Under each color block sits its **hex value** — click to copy. The active box
+shows the selected target, and its toggle — **EDIT SHADE**, **EDIT BASE** or
+**EDIT HIGH** — unlocks typing: type a new hex and press Enter. A base derives
+its light and shadow (eyedropper-style); a shadow or highlight takes the color
+as typed. The previous box stays display-only.
 
 The **Use base color as brush** button lives in the gear **Settings** popup:
 it sends the base colour to Krita's foreground. Slider edits never touch the
@@ -88,7 +94,7 @@ brush on their own.
 ## 4. Pick your three colours
 
 Click a target glyph or its swatch to make it active, then move **Hue**,
-**Saturation** and **Light**. The orb re-renders live.
+**Saturation** and **Light**. The sphere re-renders live.
 
 `Light` applies to the base target only — shadow and light are derived from it,
 so the three stay a coherent set rather than three unrelated colours.
@@ -102,7 +108,8 @@ it:
 
 Six presets ship with the plugin: **Artistic**, **Real**, **Nocturne**,
 **Gloss**, **Matte** and **Neon**. Each one fully defines the look, so
-switching never leaves the previous preset's glow or ambient behind.
+switching never leaves the previous preset's glow or ambient behind. Click the
+lit preset again to switch it off: the lighting you had before comes back.
 
 **Nocturne** applied — low key, cool moonlight, deep shadow:
 
@@ -119,35 +126,44 @@ The **eyedropper** (the pipette glyph) activates Krita's own Color Sampler tool.
 Click any pixel and Lumina builds a whole lighting set around it — not just the
 base colour.
 
-Here the sea teal has been sampled off the beach scene above:
+Here the sea teal has been sampled off the beach scene above (the line under
+the target dots says where the new base came from):
 
 ![After sampling the sea teal](../images/step4_sampled.png)
 
 | You sample | Base | Light | Shadow |
 |---|---|---|---|
-| `#ff8a4e` sunset | `#ff8a4e` | `#ffac80` | `#802e35` |
-| `#2c6b74` sea | `#2c6b74` | `#63b3ae` | `#193a30` |
-| `#efc994` sand | `#efc994` | `#f6dab3` | `#78544e` |
+| `#ff8a4e` sunset | `#ff8a4e` | `#ffded4` | `#bb571e` |
+| `#2c6b74` sea | `#2c6b74` | `#5aa584` | `#00354f` |
+| `#efc994` sand | `#efc994` | `#ffffff` | `#bf8d41` |
 
-Sample three colours off the sunset beach in the first screenshot and you get
-exactly the palette strip painted along the bottom of it. That distribution also
-runs automatically whenever the brush colour changes externally — from the
-palette, the colour selector docker, or a script.
+The palette strip painted along the bottom of the beach scene came from an
+earlier version of these derivations; the table is what Lumina gives today. The
+same distribution runs automatically whenever the brush colour changes in Krita
+— from the palette, a colour selector docker, or a script — with the base
+selected; with the shade or highlight selected, only that target is replaced.
 
 ## 7. Sample the result into your brush
 
-**Click and drag on the orb.** Krita's foreground (brush) colour updates
-immediately, so you can paint with the value you just read. The button at the
-bottom of the panel sends the base colour across without a drag.
+**Click and drag on the sphere.** Krita's foreground (brush) colour updates
+immediately, so you can paint with the value you just read, and the colour lands
+in **Recent picks**. The lemon pops on a click; hold the button long enough and
+it starts to sweat. Arrow keys nudge it a pixel at a time for a precise pick
+(Enter picks). **Use base color as brush** in the gear's Settings sends the base
+colour across without a drag.
 
 > The core rule of this tool: **the sphere's colours change only from the
-> sliders, the target dots, or the eyedropper. Clicking the sphere does not
-> change the sphere** — it only chooses a colour to draw with.
+> sliders, the hex box, or Krita's colour (the eyedropper, a selector). Clicking
+> the sphere does not change the sphere** — it only chooses a colour to draw
+> with. The one exception is deliberate: **Shift-click** makes the colour the
+> selected target's.
 
 ## 8. Settings
 
-The **gear** opens light direction, render quality, the sampler and hex-value
-toggles, and **Save settings**. Your setup is saved as you work and restored next time
+The **gear** opens light direction, highlight size, render quality, **Sticky
+distance** (how far past the sphere's edge a pick keeps hold), the sampler,
+hex-value and **Compact panel** toggles, and **Save settings**. It opens beside
+the panel, on the canvas side. Your setup is saved as you work and restored next time
 Krita opens, so you never lose a lighting set to a crash or a forced quit.
 
 ## Where to next

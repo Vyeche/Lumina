@@ -7,6 +7,8 @@ conversion. This adapter accepts QColor values and returns a QImage when Qt is
 available.
 """
 
+from collections import OrderedDict
+import copy
 from typing import Sequence
 import time
 
@@ -17,10 +19,10 @@ except Exception:
     _HAS_QT = False
 
 try:
-    from .color_engine import ColorEngine
+    from .color_engine import ColorEngine, RenderCancelled
 except ImportError:
     try:
-        from color_engine import ColorEngine
+        from color_engine import ColorEngine, RenderCancelled
     except ImportError:
         import importlib.util as _ilu
         import os as _os
@@ -29,6 +31,7 @@ except ImportError:
         _mod = _ilu.module_from_spec(_spec)
         _spec.loader.exec_module(_mod)
         ColorEngine = _mod.ColorEngine
+        RenderCancelled = _mod.RenderCancelled
 
 
 def _qcolor_to_floats(qcolor) -> Sequence[float]:
@@ -54,6 +57,8 @@ class SphereColorProcessor:
     engine so callers that inspect processor state do not see stale values.
     """
 
+    FULL_CACHE_SIZE = 8
+
     def __init__(self, resolution: int = 256):
         self.resolution = max(8, min(int(resolution), 512))
 
@@ -64,6 +69,16 @@ class SphereColorProcessor:
 
         # Last render_image() stage timings in ms (buffer pack + QImage).
         self.last_ms = {"buffer": 0.0, "qimage": 0.0}
+
+        # Full-quality output cache (issue #40 §1): the last FULL_CACHE_SIZE
+        # full-quality results as immutable bytes, keyed exactly, least
+        # recently used dropped first. Previews never populate it; a full
+        # render reuses an entry only on exact key match. It holds several
+        # so toggling a preset on and off, or stepping back to a recent
+        # look, is instant (one entry only ever matched an unchanged state).
+        # last_cache_hit reports the previous render_image.
+        self._full_cache = OrderedDict()
+        self.last_cache_hit = False
 
         self.engine = ColorEngine(resolution=self.resolution)
 
@@ -165,15 +180,43 @@ class SphereColorProcessor:
         """Render the sphere as a list of red, green, blue integer triples."""
         return self.engine.render(self._coerce_color(base_color), width, height)
 
-    def render_image(self, base_color, width=None, height=None):
-        """Render the sphere and return a QImage, or raw BGRA bytes without Qt."""
+    def render_image(self, base_color, width=None, height=None,
+                       full_quality=False):
+        """Render the sphere and return a QImage, or raw BGRA bytes without Qt.
+
+        full_quality marks a release/final render at the configured size:
+        only those consult and populate the one-entry output cache, so a
+        drag preview (smaller size, suspended smoothing) can never replace
+        or satisfy a full-quality result. Callers that do not opt in render
+        exactly as before.
+        """
         w = self.resolution if width is None else max(2, int(width))
         h = self.resolution if height is None else max(2, int(height))
+        base = self._coerce_color(base_color)
 
-        pixels = self.engine.render(self._coerce_color(base_color), w, h)
+        key = None
+        if full_quality:
+            key = self._full_cache_key_for(base, w, h)
+            cached = self._full_cache.get(key)
+            if cached is not None:
+                self._full_cache.move_to_end(key)
+                self.last_cache_hit = True
+                return self._image_from_bytes(cached, w, h)
+            self.last_cache_hit = False
+        else:
+            self.last_cache_hit = False
+
+        pixels = self.engine.render(base, w, h)
         t_buf = time.perf_counter()
         raw = self._build_buffer(pixels, w, h)
         buf_ms = (time.perf_counter() - t_buf) * 1000.0
+
+        if full_quality:
+            # Immutable snapshot: later renders must not observe mutation.
+            self._full_cache[key] = bytes(raw)
+            self._full_cache.move_to_end(key)
+            while len(self._full_cache) > self.FULL_CACHE_SIZE:
+                self._full_cache.popitem(last=False)
 
         if _HAS_QT:
             t_img = time.perf_counter()
@@ -191,10 +234,114 @@ class SphereColorProcessor:
         self.last_ms = {"buffer": buf_ms, "qimage": 0.0}
         return raw
 
-    def _build_buffer(self, pixels, w, h):
+    def _full_cache_key_for(self, base, w, h):
+        """Complete cache key: versions, base, size, settings, format."""
+        return (ColorEngine.RENDER_ALGORITHM_VERSION,
+                ColorEngine.GEOMETRY_ALGORITHM_VERSION,
+                tuple(base), w, h,
+                self.engine.render_signature(),
+                "argb32" if _HAS_QT else "bgra")
+
+    @staticmethod
+    def _image_from_bytes(cached, w, h):
+        """Rebuild the return value from cached bytes without re-rendering."""
+        if _HAS_QT:
+            return QImage(
+                bytes(cached),
+                w,
+                h,
+                w * 4,
+                QImage.Format_ARGB32,
+            ).copy()
+        return bytearray(cached)
+
+    def clear_full_cache(self):
+        """Drop the cached full-quality result (e.g. settings reset)."""
+        self._full_cache.clear()
+        self.last_cache_hit = False
+
+    def has_full_render(self, base_color, width, height) -> bool:
+        """Whether a full-quality render for the current state is cached."""
+        key = self._full_cache_key_for(self._coerce_color(base_color),
+                                       max(2, int(width)), max(2, int(height)))
+        return key in self._full_cache
+
+    # ColorEngine attributes that are caches of its own work rather than
+    # settings. An off-thread render (see full_render_job) copies everything
+    # else from the live engine and keeps these to itself: the caches are
+    # filled in place, so sharing them across threads would race. Each stage
+    # cache is keyed on the settings it depends on, so a copy's caches stay
+    # right without any invalidation from the live engine's setters.
+    ENGINE_CACHES = frozenset((
+        "_normal_grid", "_mask_grid", "_coverage_grid", "_pos_grid",
+        "_grid_width", "_grid_height", "_geo_cache", "_shading_cache",
+        "_light_vector", "_diffuse_cache", "_shadow_cache", "_spec_cache",
+        "_light_cache_key_value", "_light_ldir", "_light_illum", "_light_ndl",
+        "_light_half", "_material_cache_key_value", "_material_body",
+        "_timings", "_last_timing_log", "_cancel"))
+
+    def full_render_job(self, base_color, width, height):
+        """Snapshot what a full-quality render needs, on the UI thread.
+
+        Returns ``(key, w, h, base, settings)`` for :meth:`run_full_render_job`
+        and :meth:`store_full_render`. The settings are plain values and LUTs
+        the engine replaces rather than edits, so later changes to the live
+        engine cannot reach a render already under way.
+        """
+        w = max(2, int(width))
+        h = max(2, int(height))
+        base = self._coerce_color(base_color)
+        settings = {k: v for k, v in self.engine.__dict__.items()
+                    if k not in self.ENGINE_CACHES}
+        if getattr(self, "_job_engine", None) is None:
+            engine = copy.copy(self.engine)
+            for name in self.ENGINE_CACHES:
+                engine.__dict__.pop(name, None)
+            engine._geo_cache = {}
+            engine._shading_cache = {}
+            engine._timings = {}
+            engine._grid_width = engine._grid_height = 0
+            engine._light_cache_key_value = None
+            engine._material_cache_key_value = None
+            self._job_engine = engine
+        return (self._full_cache_key_for(base, w, h), w, h, base, settings)
+
+    def run_full_render_job(self, job, cancel=None):
+        """Render a :meth:`full_render_job` and return its BGRA bytes.
+
+        Safe off the UI thread: it uses an engine of its own (made by
+        :meth:`full_render_job`, kept between jobs so its geometry stays
+        warm) and touches nothing else. One job at a time. Returns None when
+        ``cancel`` (a threading.Event) is set before it finishes.
+        """
+        _key, w, h, base, settings = job
+        engine = self._job_engine
+        engine.__dict__.update(settings)
+        engine._cancel = cancel
+        try:
+            if engine._grid_width == w and engine._grid_height == h:
+                engine._compute_shading()      # light may have moved since
+            pixels = engine.render(base, w, h)
+        except RenderCancelled:
+            return None
+        finally:
+            engine._cancel = None
+        return bytes(self._build_buffer(pixels, w, h, engine))
+
+    def store_full_render(self, job, raw):
+        """Back on the UI thread: cache a finished job, return its QImage."""
+        key, w, h, _base, _settings = job
+        self._full_cache[key] = raw
+        self._full_cache.move_to_end(key)
+        while len(self._full_cache) > self.FULL_CACHE_SIZE:
+            self._full_cache.popitem(last=False)
+        return self._image_from_bytes(raw, w, h)
+
+    def _build_buffer(self, pixels, w, h, engine=None):
         """Pack RGB pixels into BGRA with the engine's analytic circle coverage."""
-        mask = self.engine.mask_grid()
-        coverage = self.engine.coverage_grid()
+        engine = self.engine if engine is None else engine
+        mask = engine.mask_grid()
+        coverage = engine.coverage_grid()
         raw = bytearray(w * h * 4)
         index = 0
 

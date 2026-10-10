@@ -523,7 +523,7 @@ file open, so the importer can always delete the directory.
 
 ---
 
-### Issue 2: CanvasChange Not Called
+### Issue 3: CanvasChange Not Called
 
 **Symptoms**:
 - Widget works on first canvas, fails after switching
@@ -553,7 +553,7 @@ class SphereDocker(DockWidget):
 
 ---
 
-### Issue 3: Memory Leak on Widget Creation
+### Issue 4: Memory Leak on Widget Creation
 
 **Symptoms**:
 - Memory usage grows with each Krita restart

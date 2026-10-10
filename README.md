@@ -18,28 +18,37 @@ That shot is the two worlds side by side. The beach is flat graphic work —
 banded sky, hard-edged sun, silhouette palm and dog, birds, a fish shoal. The
 panel beside it is a smoothly shaded 3D sphere lit from the same key. Three
 colours sampled off the artwork — a sunset orange, a sea teal and a sand cream —
-and Lumina derived a coherent shadow / base / light set from each; the strip
-along the bottom of the canvas is its output, and the sphere on the right is
-what those same values look like rendered rather than banded.
+sit in *Recent picks*, and Lumina derived a coherent shadow / base / light set
+from the orange; the sphere is what those values look like rendered rather than
+banded. (The strip along the bottom of the canvas was painted from an earlier
+version of these derivations.)
+
+![Lumina in use: the lemon sampler reading colours off the sphere, picks
+collecting in Recent picks, selecting a target, sweeping the hue, and a preset
+switched on and off](images/lumina_demo.gif)
 
 **New here? Start with [Getting started](documentation/GettingStarted.md).**
 
 ## Features
 
-- **Phong shading** — ambient, diffuse, specular, Fresnel rim and a mixer mode,
-  rendered in pure Python with no third-party dependencies.
-- **Three linked targets** — shadow, base and light. Each has its own colour
-  swatch beside its glyph, and the active one is edited by the Hue / Saturation /
-  Light sliders.
+- **Calibrated shading** — fitted against a reference lighting app: shadows
+  that stay rich and build into a core, a highlight that sits toward the light,
+  reflected light on the far edge. Pure Python, no third-party dependencies.
+- **Three linked targets** — *Shade*, *Base* and *High*. Pick a base and the
+  light and shadow are derived around it (in OKLCH); edit any of the three with
+  perceptual Hue / Saturation / Light sliders, and undo / redo the changes.
+- **The lemon sampler** — rests on the sphere under the pointer, shows the
+  colour and hex under it, and sends a click straight to Krita's brush. Picks
+  collect in **Recent picks** (pin the favourites).
+- **Krita's colour, both ways** — an eyedropper pick or any colour you choose in
+  Krita replaces the selected target, in the active layer's colour space
+  (Display P3 layers included); Lumina's picks never come back as new targets.
 - **Six lighting presets** — Artistic, Real, Nocturne, Gloss, Matte and Neon.
-  Each fully defines the look, so switching presets never leaves the previous
-  one's glow or ambient behind.
-- **Direct colour sampling** — drag across the sphere to read highlight,
-  midtone and shadow values; Krita's foreground colour updates live.
+  Click one again to switch it off and get your lighting back; the lit preset is
+  remembered across restarts.
 - **Settings persistence** — your setup is saved as you work and restored next
-  time Krita opens.
-- **Adjustable light direction and render quality**, plus a headless colour
-  sampler ring that follows the pointer.
+  time Krita opens; light direction, highlight size, render quality, sticky
+  distance and a compact mode live under the gear.
 
 ## Installation
 
@@ -51,7 +60,7 @@ import it directly, no need to extract anything. Then restart Krita.
 
 ```bash
 DEPLOY="$HOME/.var/app/org.kde.krita/data/krita/pykrita"
-rsync -a --delete --exclude='__pycache__' src/Lumina/ "$DEPLOY/Lumina/"
+rsync -a --delete --exclude='__pycache__' --exclude='lumina_log.txt' src/Lumina/ "$DEPLOY/Lumina/"
 cp src/Lumina.desktop "$DEPLOY/"
 ```
 
@@ -65,14 +74,15 @@ the plugin under Krita's own Python.
 ## Usage
 
 1. Open the **Lumina** docker.
-2. Pick a target — click either the glyph or its colour swatch.
-3. Adjust **Hue**, **Saturation** and **Light** for that target. *Light* is the
-   base target only; shadow and light are derived from it.
+2. Pick a target — *Shade*, *Base* or *High* — by its glyph or its colour swatch.
+3. Adjust **Hue**, **Saturation** and **Light** for that target, or pick a colour
+   in Krita (the eyedropper button, a colour selector) to replace it.
 4. **Click and drag** on the sphere to sample a colour. Krita's foreground
    (brush) colour updates immediately; the sphere itself is never changed by
-   picking.
-5. Use the **gear** for light direction, render quality, the sampler toggle and
-   **Save settings**.
+   picking. **Shift-click** instead makes the colour the selected target's.
+5. Click a **preset** for a look, and again to switch it off.
+6. Use the **gear** for light direction, highlight size, render quality, sticky
+   distance and the compact panel.
 
 ## How it works
 
@@ -80,12 +90,14 @@ The sphere is a unit hemisphere. Each pixel maps to a surface normal, and the
 shading is evaluated per pixel:
 
 ```
-C = base × diffuse × light_tint      # light-tinted diffuse
-  + shadow_colour × (1 - N·L)^1.35   # shadow blend
-  + Fresnel rim at the silhouette     # (1 - z)^5
-  + ambient fill
-  + specular highlight                # soft-shouldered Phong lobe
-  then contrast, saturation, mixer and glow
+surface  = base, its hue moving toward the shadow's by signed N·L   # into the core
+         + base -> light toward the lit peak
+body     = surface × diffuse (soft floor, no hard terminator)
+         + environment light × surface colour                       # sky, ground, ambient
+         + reflected light on the edge away from the light
+         + specular lobe centred toward the light
+         + Fresnel rim at the silhouette
+then contrast, saturation, mixer, glow and a soft display roll-off
 ```
 
 The shading engine (`color_engine.py`) is deliberately free of Qt and Krita
@@ -99,10 +111,11 @@ decisions and the reasoning behind each tuning constant.
 src/Lumina/
   __init__.py              Registers the dock widget factory with Krita
   sphere_docker.py         The docker: layout, controls, presets, persistence
-  sphere_widget.py         The orb: painting, picking, hover sampler
+  sphere_widget.py         The sphere: painting, picking, hover sampler
   color_engine.py          Pure-Python shading engine (no Qt, no Krita)
   color_processor.py       Adapter between the engine and Krita/Qt
-  color_controls.py        Sliders, buttons, settings panel
+  color_controls.py        Sliders, buttons, lemon sampler, recent picks, settings panel
+  derivation.py            Light / shadow derivation and the OKLCH slider maths
   test_shading.py          Smoke tests (needs PyQt5, no Krita)
   test_shading_standalone.py  Engine tests, run from the repository root
 ```
@@ -135,17 +148,19 @@ plugin ships with none of it.
 One constraint shaped the whole codebase: **keep the import surface as small as
 possible.**
 
-`color_engine.py`, which does all the actual shading, imports exactly two
-modules — `math` and `typing`, both standard library. The rest of the plugin
-adds only PyQt5, which Krita already ships, and Krita's own scripting module:
+`color_engine.py`, which does all the actual shading, imports only the standard
+library: `math`, `time`, `logging` and `typing`. The rest
+of the plugin adds only PyQt5, which Krita already ships, and Krita's own
+scripting module (modules of the plugin itself in *italics*):
 
 | Module | Imports |
 |---|---|
-| `color_engine.py` | `math`, `typing` |
-| `color_processor.py` | `PyQt5`, `typing`, `color_engine`, `math` |
-| `color_controls.py` | `PyQt5`, `typing` |
-| `sphere_widget.py` | `PyQt5`, `logging`, `math`, `os`, `typing` |
-| `sphere_docker.py` | `PyQt5`, `krita`, `logging`, `math`, `os`, `typing`, `weakref` |
+| `color_engine.py` | `math`, `time`, `logging`, `typing` |
+| `derivation.py` | `math` |
+| `color_processor.py` | `PyQt5`, `collections`, `importlib`, `os`, `time`, `typing`, *`color_engine`* |
+| `color_controls.py` | `PyQt5`, `math`, `random`, `time`, `typing`, *`derivation`*, *`tooltip`*, *`typed_entry`* |
+| `sphere_widget.py` | `PyQt5`, `math`, `typing`, *`lumina_logging`* |
+| `sphere_docker.py` | `PyQt5`, `krita`, `json`, `math`, `os`, `time`, `typing`, `weakref`, *the modules above* |
 
 Every one of those is either the Python standard library or shipped with Krita.
 There is no numpy, no colour-science library, no third-party package of any

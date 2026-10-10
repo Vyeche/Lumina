@@ -1,5 +1,140 @@
 New bugs
 
+### Rim light and shadow lacked depth; highlight too bright (issue #45, round 2, fixed 2026-10-10, awaiting confirmation)
+
+**Symptom:** next to the reference spheres, Lumina's rim light had no depth and
+its shade did not dissolve and grade into the shadow the way the reference's
+does. Rim, shadow and base sit right next to each other, so the gradation
+between them is what reads as depth. The highlight peak was also brighter than
+the reference's.
+**Cause:** ring averages hid it; measured as lightness against N·L and in a
+wedge facing away from the light, three things were off. The diffuse curve
+2gE/(1+gE) rose so fast the shade was nearly at full brightness by N·L 0.3,
+where the reference grades almost linearly to 0.6. Reflected light was
+`edge ** 3.5`, a thin line at the very silhouette, where the reference's rises
+out of the core as a band and levels off. And the specular peak was 0.02–0.10
+OKLab L too bright on every sphere, sitting too far toward the light.
+**Fix:** the diffuse level is split from its bend (`DIFFUSE_LEVEL`,
+`DIFFUSE_GAIN`); reflected light rises as a smoothstep (`REFLECT_START`,
+`REFLECT_END`) and holds; a new engine-side `SPEC_GAIN` and a refit of the
+highlight constants bring the peak down and in. Whole-sphere error 1.86 → 1.66,
+shadow structure 1.74 → 1.55, shade curve 0.031 → 0.015, highlight bands
+3.36 → 2.24.
+
+### The private Ref Tester's autosave was committed (fixed 2026-10-10)
+
+**Cause:** `.gitignore` covered the Ref Tester `.kra` but not Krita's hidden
+autosave of it (`images/.Sphere UI … Ref Tester.kra-autosave.kra`), and a
+`git add -A` swept it into a PR branch, which was pushed to Gitea.
+**Fix:** the commit was rewritten without it and force-pushed; the ignore rule
+now also covers `.Sphere UI … Ref Tester*` and `*.kra-autosave.kra`. Gitea may
+keep the old commit object until its storage is cleaned up.
+
+### Mouse wheel on a slider lagged badly (fixed 2026-10-10, confirmed by the author)
+
+**Cause:** a slider drops to the quick drag-size render only between a mouse
+press and release. A wheel notch is neither, so every notch ran a full-quality
+render (~330 ms in Krita at 288 px) and a quick scroll queued them.
+**First fix:** a burst of wheel notches (or held arrow keys) counts as one drag
+that ends 250 ms after the last step. Not enough on its own: real scrolling is
+flick, pause, flick, and every pause still set off a 330 ms render that the next
+flick queued behind (see the next entry for the rest).
+
+### The panel froze after letting go of a slider (fixed 2026-10-10, wheel confirmed by the author)
+
+**Symptom:** after a long hold, the knob ripple and the falling sweat stalled on
+release; scrolling a slider hitched at every pause.
+**Cause:** the full-quality render after a release or pause ran on the UI
+thread for ~330 ms, freezing all animation and input. Moving it to a worker
+thread alone did not help much: the UI thread waited up to Python's 5 ms switch
+interval to get the interpreter lock back each time it returned from Qt.
+**Fix:** inside Krita the full render runs on a worker thread with its own
+engine, and the switch interval drops to 0.2 ms while it runs. A 10 ms timer
+now stays within ~14 ms of schedule through a render (it ran ~330 ms late).
+**Then:** the wheel still lagged. A pause in a scroll started a full render,
+and when scrolling resumed it was still running: the previews shared the
+interpreter with it and took ~47 ms instead of ~23, and notches bunched up.
+A preview, or a slider starting to move, now cancels it (the engine checks a
+cancel flag once per row). Simulated flick-pause-flick: previews 25 ms mean,
+38 ms worst, against 39 / 67 ms before.
+In the author's own 25 s scroll in Krita afterwards: 170 previews at 20 ms mean
+(one over 35 ms), every full render in the background, 4 stale ones cancelled.
+
+### Slider sweat hitched (fixed 2026-10-10, awaiting confirmation)
+
+**Cause:** the sweat overlay spans the panel and repainted all of it, sphere
+included, 33 times a second; showing it also redrew the whole panel as the sweat
+began. **Fix:** each tick repaints only round the drops, and the overlay stays up
+(it paints nothing when dry) instead of being shown each time.
+
+### The sphere changed colour during a drag on it (fix merged 2026-10-09, awaiting confirmation)
+
+**Symptom:** dragging or clicking on the sphere, the sphere sometimes changed
+colour on its own.
+
+**Cause (as far as the log shows):** each change was a change of Krita's own
+colour adopted as a new target -- canvas colours, with the Brush tool active, so
+most likely Ctrl-click / Ctrl-drag on the canvas or a drag in the Advanced Color
+Selector. Lumina's own sphere picks echoing back could not be reproduced (Krita
+stores exactly what Lumina sends; a 2.5 s synthetic drag left the targets alone).
+
+**Fix:** foreground changes are never adopted while the sphere is pressed or for
+350 ms after its last pick; the readout says when a Krita colour does replace a
+target; every adopted stream logs its source (`EXT_SOURCE`, `EXT_IGNORED`).
+
+### Settings popup did not always appear (fix merged 2026-10-09, awaiting confirmation)
+
+**Cause:** it was clamped to the *primary* screen's geometry, so with Krita on
+another monitor it opened out of sight; it also always tried the docker's right
+side. **Fix:** placed beside the docker on the canvas side, inside Krita's window
+on the docker's own monitor.
+
+### Presets lagged (fix merged 2026-10-09, awaiting confirmation)
+
+**Cause:** every preset click ran a ~150 ms full-quality render on the UI
+thread. **Fix:** the drag-size preview shows at once (~40 ms) and the full render
+follows; the render cache keeps 8 looks, so toggling a preset back is ~2 ms.
+
+### A preset's highlight colour was lost on restart (fixed 2026-10-09)
+
+The specular colour a preset sets (Matte, Nocturne, Neon) was never saved, and
+*Reset all* never restored white. Both fixed; covered by tests.
+
+### Picked colors did not match Krita's on imported (Display P3) layers (fixed 2026-10-09)
+
+**Symptom:** after an eyedropper pick, Lumina's base read `#0102bd` while
+Krita's Specific Color Selector read `#0102b5` — but only on some layers. Adding
+a fresh paint layer made them agree. Picking with a P3 layer active and then
+typing into the selector made it worse: Lumina's base and the brush changed to a
+color nobody picked.
+
+**Cause:** the reference images in the tester document were imported iPhone/Mac
+screenshots and kept their **Display P3** profile inside an sRGB document
+(`ConvertToImageColorSpaceOnImport=false`). Three things then disagreed:
+
+1. Krita's selector shows the foreground in the **active layer's** color space
+   (its "Lock to current layer colorspace" button, on by default). Verified by
+   switching the active layer with the foreground untouched: P3 layer `#6be845`,
+   sRGB layer `#00eb00`.
+2. Lumina read the foreground's raw numbers regardless of their profile, so a
+   P3-tagged `#743356` (which paints as sRGB `#7d2e57`) became the base as-is.
+3. An interim, never-committed patch then **re-sent** that value to Krita as
+   sRGB, overwriting the user's brush with a different color.
+
+**Fix:** Lumina's numbers now live in the active layer's color space, like the
+selector's: Krita's color is converted into it through Krita's own color
+management (never `colorForCanvas`, which converts for the *monitor* and differs
+on Windows machines with a calibrated profile), sent back tagged with it, and
+re-expressed when the layer space changes. Re-expressing goes from each color's
+origin, not from the previous conversion: 8-bit round trips drift
+(`#00a893` → P3 `#4ba593` → `#05a892`). The sphere and swatches are converted to
+sRGB for drawing. Lumina never writes Krita's color on an external change.
+
+Verified live in Krita 5.3.3 with KritaPilot's `color_sensors`: base, shadow and
+light picks match the selector on P3 and sRGB layers, and survive switching back
+and forth exactly. Regression tests: `test_ui_defaults.py`
+(`test_krita_colour_is_read_in_working_space` and the five after it).
+
 ### Contrast did nothing, then crashed at the slider's minimum (fixed 2026-09-29)
 
 **Symptom:** dragging the Contrast slider changed nothing until the very end,
@@ -102,7 +237,7 @@ and writes the result.
 
 Two related defects on the silhouette.
 
-**Symptom:** the orb's edge was visibly choppy, and colours right at the rim were
+**Symptom:** the sphere's edge was visibly choppy, and colours right at the rim were
 effectively unpickable.
 
 **1. The edge had no antialiasing at all.** `render_image` wrote a binary alpha
@@ -130,14 +265,14 @@ large arc, so the terminator was practically unreachable.
 (`EDGE_GLIDE`, 6px) now projects the point radially back onto the silhouette,
 so dragging past the edge glides the sample around the rim.
 
-This needed a second fix to actually work: the orb was drawn to fill its
+This needed a second fix to actually work: the sphere was drawn to fill its
 widget edge-to-edge, so the widget bounds rejected the point *before* the glide
 band was ever reached — at the four points where circle and square touch, and
-nowhere else. The orb is inset by `ORB_MARGIN` (8px) to give the band room.
-Drawing and picking now both read a single `_orb_geometry()` helper, since they
+nowhere else. The sphere is inset by `SPHERE_MARGIN` (8px) to give the band room.
+Drawing and picking now both read a single `_sphere_geometry()` helper, since they
 previously recomputed the centring separately and could drift apart.
 
-Also set `QPainter.SmoothPixmapTransform` in `paintEvent`: the orb is drawn at
+Also set `QPainter.SmoothPixmapTransform` in `paintEvent`: the sphere is drawn at
 whatever resolution it was rendered, and the drag path renders at 128px and
 upscales into a 200px widget, which was blocky.
 
@@ -155,9 +290,9 @@ handle lagged the cursor.
 per-update cost: 15.6 ms at 128px, 35.6 ms at 200px, **76.0 ms at 288px** (the
 *High* preset) — 13 Hz. The existing 0 ms coalescer cannot help, because a
 blocking 76 ms render stalls the event loop itself, so the *handle* falls behind
-rather than just the orb.
+rather than just the sphere.
 
-**Fix:** while any slider is held, the orb renders at 128px; full quality is
+**Fix:** while any slider is held, the sphere renders at 128px; full quality is
 restored on release. `ColorSlider` gained `beganDrag` / `endedDrag` signals, and
 the docker wires all 12 sliders in a single `findChildren` pass so a slider
 added later — in the main panel or the settings popup — is covered for free.
@@ -165,7 +300,7 @@ added later — in the main panel or the settings popup — is covered for free.
 
 Note the flag is deliberately *not* `_dragging`: that name already tracked the
 floating title bar's window drag. Sharing it would let a title-bar drag drop the
-orb to 128px, and a slider release would cancel an in-progress window drag.
+sphere to 128px, and a slider release would cancel an in-progress window drag.
 
 ### "Show color sampler" toggle did nothing (fixed 2026-09-29)
 
@@ -173,11 +308,11 @@ orb to 128px, and a slider release would cancel an in-progress window drag.
 > is quoted as it was originally reported.
 
 **Symptom:** unchecking *Show color sampler* in the gear popup left the ring
-following the cursor on the orb. The toggle appeared completely inert.
+following the cursor on the sphere. The toggle appeared completely inert.
 
 **Two independent defects, both required for the symptom:**
 
-1. **It gated the wrong marker.** The orb draws *two* separate markers, and the
+1. **It gated the wrong marker.** The sphere draws *two* separate markers, and the
    flag only covered the smaller one:
 
    | Marker | Drawn by | Gated by `_show_pointer`? |
@@ -194,14 +329,14 @@ following the cursor on the orb. The toggle appeared completely inert.
 
 **Fix** (`sphere_widget.py`):
 - `set_show_pointer` now also hides the sampling ring immediately when switched
-  off. Without this the ring lingered until the pointer next left the orb,
+  off. Without this the ring lingered until the pointer next left the sphere,
   which itself reads as the toggle having failed.
 - `_reposition_preview` returns early and hides the ring when `_show_pointer` is
   false, so a subsequent pointer move cannot resurrect it.
 
 **Verify (offscreen, 2026-09-29):** toggling off while hovering hides the ring
 immediately; it stays hidden across repeated pointer moves and fresh hover
-events; toggling back on restores it; and leaving the orb still hides it. 7/7
+events; toggling back on restores it; and leaving the sphere still hides it. 7/7
 checks pass. `test_shading_standalone.py` and `test_shading.py` unaffected.
 
 ### Section controls never render (fixed 2026-09-15)
@@ -243,7 +378,7 @@ Traceback (most recent call last):
            ~~~~~~~~~~^^
 
   File "$HOME/.var/app/org.kde.krita/data/krita/pykrita/LuminaPlugin/sphere_docker.py", line 157, in __init__
-    self._orb = SphereWidget()
+    self._sphere = SphereWidget()
                 ~~~~~~~~~~~~^^
 
   File "$HOME/.var/app/org.kde.krita/data/krita/pykrita/LuminaPlugin/sphere_widget.py", line 32, in __init__

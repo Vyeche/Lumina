@@ -7,8 +7,8 @@ The Lumina UI combines an interactive 3D viewport with specialized target swatch
 
 **Interactive Viewport & Picker**
 
-* **3D Orb Canvas:** Displays a real-time sphere rendered with key light, ambient light, and base color calculations.
-* **Surface Color Picker Pin:** A draggable target pointer on the orb surface that lets you sample calculated RGB values—including highlights, midtones, shadow turners, and ambient reflected light—to paint directly onto your canvas.
+* **3D Sphere Canvas:** Displays a real-time sphere rendered with key light, ambient light, and base color calculations.
+* **Surface Color Picker Pin:** A draggable target pointer on the sphere surface that lets you sample calculated RGB values—including highlights, midtones, shadow turners, and ambient reflected light—to paint directly onto your canvas.
 
 **Color Target Selectors**
 
@@ -20,7 +20,7 @@ The Lumina UI combines an interactive 3D viewport with specialized target swatch
 
 * **Hue & Saturation Sliders:** Multi-spectrum slider bars that fine-tune the color properties of whichever target swatch is currently active (Base, Light, or Shadow).
 * **Contrast Slider:** Controls the light falloff gradient on the sphere, adjusting the transition sharpness between illuminated areas and shadows (ranging from soft, diffused ambient light to crisp, high-contrast lighting).
-* **Panel Navigation Bar:** Bottom control icons for toggling between standard color palettes, lighting orb modes, and preset configurations.
+* **Panel Navigation Bar:** Bottom control icons for toggling between standard color palettes, lighting sphere modes, and preset configurations.
 
 Implementing the Lumina requires a custom shader or pixel-rendering pipeline, mathematical color mixing, and an interactive viewport with event handling.
 
@@ -97,10 +97,10 @@ The application features a sophisticated interface that allows users to manipula
 
 ### 1. Main Display Area
 
-The central part of the screen displays the 3D sphere (the Orb) being lit. Users can observe how changes to the settings immediately affect the rendered image. The UI includes:
+The central part of the screen displays the 3D sphere (the Sphere) being lit. Users can observe how changes to the settings immediately affect the rendered image. The UI includes:
 
 * A color picker for setting the base color of the object.
-* A Color Orb used for managing the light source color and intensity.
+* A Color Sphere used for managing the light source color and intensity.
 * Visual sliders and indicators to control various lighting effects.
 
 ### 2. Lighting and Color Controls
@@ -146,7 +146,7 @@ The layout should be built around a Main Workspace and a Control Panel System. T
 
 Structure: Three main sections:
 
-1. Canvas (Main Display): The large central area dedicated to displaying the 3D Orb.
+1. Canvas (Main Display): The large central area dedicated to displaying the 3D Sphere.
 2. Control Panel (Right/Sidebar): A persistent, collapsible area containing all parameters and sliders.
 3. Context/Help Panel (Bottom/Footer): Displaying instructional or status information.
 
@@ -154,16 +154,16 @@ Structure: Three main sections:
 
 | Section           | Size/Placement   | Primary Function | Content Details                                               |
 |-------------------|------------------|------------------|---------------------------------------------------------------|
-| **Canvas**        | 65-70% of screen | Visual Output    | Displays the 3D Orb, rendered with current lighting settings. |
+| **Canvas**        | 65-70% of screen | Visual Output    | Displays the 3D Sphere, rendered with current lighting settings. |
 | **Control Panel** | 30-35% of screen | Parameter Input  | Contains all sliders, pickers, and color controls.            |
 | **Context/Tools** | Top Right Corner | Tooling          | Menu icons (e.g., Settings, Save, Toggle modes).              |
 
 ### 3. Detailed Component Specifications
 
-#### A. Canvas Area (The Orb Display)
+#### A. Canvas Area (The Sphere Display)
 
-* Content: A dynamically rendered sphere (The Orb).
-* Interaction: Must support user interaction (rotation, panning) of the object or camera around the Orb.
+* Content: A dynamically rendered sphere (The Sphere).
+* Interaction: Must support user interaction (rotation, panning) of the object or camera around the Sphere.
 * Visual Aid: A subtle overlay or diagrammatic elements showing the "Principles of Illumination" when in a specific learning mode.
 
 #### B. Control Panel (The Settings)
@@ -201,10 +201,10 @@ D. Navigation & View Toggles (Right/Top Right-most)
 
 ### 5. Design Style Guide Notes
 
-* Aesthetic: Technical / Industrial-Professional. Dark mode is preferred to allow the rendered Orb to be the focus point of light.
+* Aesthetic: Technical / Industrial-Professional. Dark mode is preferred to allow the rendered Sphere to be the focus point of light.
 * Typography: Sans-serif, clean, and highly legible (e.g., Roboto, Montserrat).
 * Spacing: Utilize generous negative space around controls to prevent "cluttering."
-* Color Palette: Dominated by dark greys/blacks, with accent colors derived from the Orb's highlights or primary light source.
+* Color Palette: Dominated by dark greys/blacks, with accent colors derived from the Sphere's highlights or primary light source.
 
 To effectively build "Lumina," the code needs to manage a high-frequency real-time rendering and input-output synchronization.
 
@@ -218,11 +218,11 @@ The core purpose of the code must be to act as a real-time parameter-driven rend
 
 ### 1. Real-Time Rendering Engine (The Heart)
 
-The code must manage a 3D3D rendering loop (using WebGL, Three.js, Babylon.js, or a native engine like Unity/Unreal) that renders the Orb.
+The code must manage a 3D3D rendering loop (using WebGL, Three.js, Babylon.js, or a native engine like Unity/Unreal) that renders the Sphere.
 
-* Object Representation: The Orb is a geometrically defined sphere mesh.
+* Object Representation: The Sphere is a geometrically defined sphere mesh.
 * Lighting Math: The code must implement PBRDFloat shaders or PBR (Physically Based Rendering) shaders. This is crucial because the lighting isn't just "brighten light," but how light interacts with surface properties (albedo, roughness, metallic, and the custom ambient occlusion).
-* Camera Control: Code must manage a camera object whose position and focal point are synchronized with user inputs to allow for inspection of the Orb detail.
+* Camera Control: Code must manage a camera object whose position and focal point are synchronized with user inputs to allow for inspection of the Sphere detail.
 
 ### 2. Input Handling (The Bridge)
 
@@ -230,7 +230,7 @@ The code needs logic to map all UI elements (sliders, pickers, buttons) to their
 
 | UI Component            | Data Type       | Technical Action Required                                                                                                 |
 |-------------------------|-----------------|---------------------------------------------------------------------------------------------------------------------------|
-| **Base Color Picker**   | RGBA values     | Set the `base_color` or `albedo` parameter on the Orb material.                                                           |
+| **Base Color Picker**   | RGBA values     | Set the `base_color` or `albedo` parameter on the Sphere material.                                                           |
 | **Highlight Slider**    | Float (0.0-1.0) | Modulate the intensity or weight of the calculated highlight component.                                                   |
 | **Shadow Color Picker** | RGBA values     | Set the specific `shadow_color` parameter (likely modulating occlusion/environment map).                                  |
 | **Intensity Slider**    | Float (0.0-5.0) | Increase the Light Source "Power" or "Luminance" input for the PBRDF calculation.                                         |
