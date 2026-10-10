@@ -1,6 +1,25 @@
 New bugs
 
-### Rim light and shadow lacked depth; highlight too bright (issue #45, round 2, fixed 2026-10-10, awaiting confirmation)
+### Colour picks printed `No such signal QQuickPalette::destroyed` warnings (fixed 2026-10-10, confirmed by the author)
+
+**Symptom:** with Lumina enabled, every colour pick in Krita printed four lines to the terminal: `QObject::connect: No such signal QQuickPalette::destroyed(QObject *)`, then the same for `QQuickIcon`, `QQuickFontValueType` and `QQmlSizeValueType`. With the plugin disabled they never appeared.
+**Cause:** on each Krita colour, Lumina logs the active tool (`EXT_SOURCE ... tool=`). It found the tool with `findChildren` over the whole main window. Any such search makes PyQt wrap the objects inside Krita's QML panels (Text Properties), and each wrap prints the block. This was reproduced in Krita with Lumina off: one window-wide `findChildren`, of any type, prints exactly the block, while `allWidgets()`, colour reads and colour sets print nothing. The canvas pick watch did the same on view changes.
+**Fix (#61):** the tool lookup searches only the Toolbox dock (from `Krita.instance().dockers()`), and the canvas watch only the window's central area. Never walk Krita's whole window from Python.
+
+### Saved settings kept the old defaults after 2.7.0 (fixed 2026-10-10)
+
+**Symptom:** after updating from 2.5.1 / 2.6.0, the highlight stayed weak and the light sat where it used to, until **Reset all**. That also threw away every customisation.
+**Cause:** 2.7.0 recalibrated the lighting defaults while the settings version stayed at 5, so a saved value could not be told from a chosen one. Shininess was also saved as an int, so the 8.9 default came back as 8.
+**Fix (#59):** settings version 6 moves a value only if it still equals an old default. A 2.6.0 file holding one old preset whole gets today's version of that preset instead.
+**Caught live:** the first version also moved the author's Rim from 14 to 10. 2.7.0 had written v5 too, with today's defaults, and that 14 came from the Artistic preset. Files written by 2.7.0 (told apart by keys 2.6.0 never wrote) are now left alone. Lesson: dry-run a settings migration against a copy of a real settings file before deploying it.
+
+### The Area light was ~18x too bright, with a hard edge (fixed 2026-10-10, confirmed by the author)
+
+**Symptom:** Area, meant to be the softest lamp, had the hardest terminator, and a blown-out lit side that shifted colour (orange towards yellow, green towards mint).
+**Cause:** its power was never divided by 4π (Point's is), and `AREA_SIZE` divided out and multiplied back, so it had no effect.
+**Fix (#55):** Area now has Point's brightness times the panel's cosine. A disc-light horizon term gives the soft edge, sized by `AREA_SIZE`, and the highlight is broader and dimmer to match.
+
+### Rim light and shadow lacked depth; highlight too bright (issue #45, round 2, fixed 2026-10-10, closed with the author)
 
 **Symptom:** next to the reference spheres, Lumina's rim light had no depth and
 its shade did not dissolve and grade into the shadow the way the reference's

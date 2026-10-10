@@ -665,3 +665,188 @@ def test_highlight_peak_matches_the_reference_brightness():
     assert 0.70 <= blue <= 0.80, blue
     assert green >= 0.88, green
     print(f"  PASS highlight peaks black={black:.3f} blue={blue:.3f} green={green:.3f}")
+
+
+# --- Issue #53: the four lamp models -----------------------------------------
+def _lamp(engine_mod, light_type, **over):
+    e = engine_mod.ColorEngine(32)
+    for k, v in over.items():
+        setattr(e, k, v)
+    e.light_type = light_type
+    e.light_azimuth, e.light_elevation = 304.0, 41.0
+    e._compute_shading()
+    return e
+
+
+def _at_angle(e, deg):
+    """A point on the unit sphere at `deg` from the light direction, in the
+    plane of the light and the view axis (deg 90 = the Sun's terminator)."""
+    lv = e._light_vector
+    # a unit vector perpendicular to lv in that plane
+    px, py, pz = -lv[0] * lv[2], -lv[1] * lv[2], 1.0 - lv[2] * lv[2]
+    n = math.sqrt(px * px + py * py + pz * pz)
+    px, py, pz = px / n, py / n, pz / n
+    a = math.radians(deg)
+    return (lv[0] * math.cos(a) + px * math.sin(a),
+            lv[1] * math.cos(a) + py * math.sin(a),
+            lv[2] * math.cos(a) + pz * math.sin(a))
+
+
+def _lit(e, deg):
+    """Effective diffuse light (illuminance x N.L) at `deg` from the light."""
+    p = _at_angle(e, deg)
+    ldir, illum = e._light_for_surface(*p)
+    return illum * max(0.0, p[0] * ldir[0] + p[1] * ldir[1] + p[2] * ldir[2])
+
+
+def test_area_light_is_as_bright_as_point_and_softer():
+    """Area used to be ~18x too bright (its power was never divided by 4 pi),
+    which blew the lit side out to a hard edge with the colour shifted. It
+    now matches Point where both fully reach, and its panel keeps lighting
+    a little past Point's terminator: a soft edge, wider with a bigger panel."""
+    engine_mod = load_engine()
+    point = _lamp(engine_mod, "Point")
+    area = _lamp(engine_mod, "Area")
+    for deg in (0.0, 30.0, 50.0):
+        assert abs(_lit(area, deg) - _lit(point, deg)) <= 0.15 * _lit(point, deg), deg
+    # Point's terminator from 3 radii away is at acos(1/3) ~ 70.5 degrees.
+    past = 76.0
+    assert _lit(point, past) == 0.0
+    assert _lit(area, past) > 0.0
+    bigger = _lamp(engine_mod, "Area", AREA_SIZE=3.0)
+    assert _lit(bigger, past) > _lit(area, past)
+    # and the edge is soft: no step between neighbouring angles
+    steps = [_lit(area, d) for d in range(55, 85)]
+    assert max(abs(a - b) for a, b in zip(steps, steps[1:])) < 0.05, steps
+    print("  PASS area light: point-bright, soft edge")
+
+
+def test_point_and_spot_behave_as_lamps():
+    """Point: a nearby bulb, brighter on the near side than the Sun's even
+    light, lighting a smaller cap. Spot: Point's light inside its cone,
+    fading through the cone's soft edge to nothing outside it."""
+    engine_mod = load_engine()
+    sun = _lamp(engine_mod, "Sun")
+    point = _lamp(engine_mod, "Point")
+    spot = _lamp(engine_mod, "Spot")
+    assert _lit(point, 0.0) > 1.5 * _lit(sun, 0.0)          # near side hotter
+    assert _lit(sun, 80.0) > 0.0 and _lit(point, 80.0) == 0.0   # smaller cap
+    assert abs(_lit(spot, 0.0) - _lit(point, 0.0)) < 1e-9     # inside the cone
+    fade = [_lit(spot, d) for d in (0.0, 30.0, 45.0, 55.0, 65.0)]
+    assert fade[0] > 0 and fade[-1] == 0.0, fade
+    assert all(b <= a + 1e-9 for a, b in zip(fade, fade[1:])), fade
+    print("  PASS point and spot")
+
+
+def test_area_highlight_is_broader_and_dimmer_than_point():
+    """A panel reflects as a patch: under Area the highlight spreads wider
+    and its peak drops (the same light over a larger area)."""
+    engine_mod = load_engine()
+    res = 64
+
+    def spec(light_type):
+        out = []
+        for sm in (engine_mod.ColorEngine.SPEC_MAX_DEFAULT, 0.0):
+            e = engine_mod.ColorEngine(res)
+            e.light_type = light_type
+            e.light_azimuth, e.light_elevation = 304.0, 41.0
+            e.spec_max = sm
+            e._compute_shading()
+            out.append(e.render((0.8, 0.35, 0.2), res, res))
+        a, b = out
+        return [sum(a[y][x]) - sum(b[y][x]) for y in range(res) for x in range(res)]
+
+    point, area = spec("Point"), spec("Area")
+    assert max(area) < max(point), (max(area), max(point))
+    strong = lambda m: sum(1 for v in m if v > 0.2 * 255)
+    assert strong(area) > 1.1 * strong(point)
+    print("  PASS area highlight broader and dimmer")
+
+
+def test_form_zones_follow_the_lamp():
+    """The hover readout names the form zone; it must follow what the lamp
+    actually does: light facing it, core shadow behind the terminator,
+    reflected light on the far rim, nothing lit outside a Spot's beam, and
+    Area's soft edge still turning (not yet core) past Point's terminator."""
+    engine_mod = load_engine()
+
+    def zone(light_type, deg):
+        e = _lamp(engine_mod, light_type)
+        x, y, z = _at_angle(e, deg)
+        return e.form_zone(x, y)
+
+    for lamp in ("Sun", "Point", "Area"):
+        assert zone(lamp, 0.0) in ("Highlight", "Light"), lamp
+    assert zone("Sun", 60.0) == "Halftone"
+    assert zone("Sun", 95.0) == "Terminator"
+    assert zone("Sun", 105.0) == "Core shadow"          # behind the terminator
+    assert zone("Sun", 120.0) == "Reflected light"      # out on the far rim
+    # the rim facing away from the light (lower left for 304/41)
+    sun = _lamp(engine_mod, "Sun")
+    lv = sun._light_vector
+    k = 0.995 / math.hypot(lv[0], lv[1])
+    assert sun.form_zone(-lv[0] * k, -lv[1] * k) == "Reflected light"
+    # Point's cap ends at ~70.5 degrees; Area keeps a soft edge past it
+    assert zone("Point", 85.0) in ("Terminator", "Core shadow")
+    assert zone("Area", 76.0) in ("Halftone", "Terminator")
+    # outside the Spot's beam it is shadow even facing the lamp
+    assert zone("Spot", 65.0) == "Core shadow"
+    print("  PASS form zones")
+
+
+# --- Issue #56: the fast pipeline -------------------------------------------
+def _matrix_engines(engine_mod, size):
+    trios = [((0.40, 0.10, 0.12), (0.92, 0.38, 0.09), (1.0, 0.9, 0.8)),
+             ((0.0, 0.65, 0.58), (0.0, 0.9, 0.0), (1.0, 1.0, 1.0))]
+    variants = [{}, {"mixer_mode": "Additive"}, {"mixer_mode": "Multiplicative"},
+                {"glow_intensity": 0.6}, {"smooth": 0.0}, {"smooth": 1.0},
+                {"contrast": 1.35}, {"saturation": 1.5}, {"grain": 30.0},
+                {"rim_light": 0.3}, {"spec_max": 1.0, "shininess": 30.0}]
+    for lamp in ("Sun", "Point", "Spot", "Area"):
+        for trio in trios:
+            for extra in (variants if lamp == "Sun" else [{}]):
+                e = engine_mod.ColorEngine(size)
+                for k, v in extra.items():
+                    setattr(e, k, v)
+                e._build_contrast_lut()
+                e._build_spec_lut()
+                e.light_type = lamp
+                e.set_shadow_color(trio[0])
+                e.set_light_color(trio[2])
+                e.set_light_angle(304.0, 41.0)
+                yield e, trio[1], (lamp, extra)
+
+
+def test_fast_pipeline_is_bit_identical_to_the_reference():
+    """render() is the restructured pipeline; render_reference() is the
+    original. They must agree exactly, at an even size and at an odd one
+    (where the sphere touches the border and the blur takes its other path),
+    and on a second render with only the colour changed (the cached path)."""
+    engine_mod = load_engine()
+    for size in (48, 41):
+        for e, base, label in _matrix_engines(engine_mod, size):
+            assert e.render(base, size, size) == e.render_reference(base, size, size), (size, label)
+            other = (base[2], base[0], base[1])
+            assert e.render(other, size, size) == e.render_reference(other, size, size), (size, label)
+    print("  PASS fast pipeline identical")
+
+
+def test_fast_pipeline_is_much_faster_on_a_colour_change():
+    """The commonest edit (Hue / Sat / Value) reuses the cached lighting:
+    measured on the same machine against the reference, so it holds
+    anywhere. (At 288 px: ~295 ms -> ~95 ms.)"""
+    import time as _time
+    engine_mod = load_engine()
+    e = engine_mod.ColorEngine(160)
+    e.render_bgra((0.9, 0.4, 0.1), 160, 160)              # warm the caches
+    best_fast = best_ref = None
+    for k in range(3):
+        base = (0.2 + 0.1 * k, 0.5, 0.9)
+        t = _time.perf_counter(); e.render_bgra(base, 160, 160)
+        fast = _time.perf_counter() - t
+        t = _time.perf_counter(); e.render_reference(base, 160, 160)
+        ref = _time.perf_counter() - t
+        best_fast = fast if best_fast is None else min(best_fast, fast)
+        best_ref = ref if best_ref is None else min(best_ref, ref)
+    assert best_fast * 2.0 < best_ref, (best_fast, best_ref)
+    print(f"  PASS colour change {best_fast * 1000:.0f} ms vs {best_ref * 1000:.0f} ms")

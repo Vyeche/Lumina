@@ -10,8 +10,9 @@ drives it the way a user would. Everything it writes is reproducible.
                                                          # icon for the header
 
 Outputs (in images/): step1_panel.png, step2_edited.png, step3_preset.png,
-step4_sampled.png, Lumina_preset_{nocturne,gloss,neon}.png, lumina_demo.gif.
-The GIF needs ffmpeg on PATH.
+step4_sampled.png, Lumina_preset_{nocturne,gloss,neon}.png, Lumina_lamps.png
+(the four lamps over their form-zone maps), lumina_demo.gif and
+lumina_zones.gif (the zone readout under each lamp). The GIFs need ffmpeg.
 
 The feature image (Lumina_feature.png) is a screenshot of Krita itself and is
 taken in Krita, not here.
@@ -155,6 +156,125 @@ def stills():
     d.close()
 
 
+# ------------------------------------------------------ lamps and zones
+ZONE_COLOURS = (("Highlight", (255, 255, 255)), ("Light", (240, 200, 90)),
+                ("Halftone", (200, 120, 60)), ("Terminator", (150, 40, 40)),
+                ("Core shadow", (52, 42, 78)), ("Reflected light", (70, 140, 200)))
+LAMPS = ("Sun", "Point", "Spot", "Area")
+LAMP_NOTES = {"Sun": "even, distant", "Point": "a nearby bulb",
+              "Spot": "a soft-edged beam", "Area": "a broad panel"}
+
+
+def set_lamp(d, mode):
+    d._on_light_type_changed(mode)
+    d.light_type_row.set_mode(mode)
+    d.processor.clear_full_cache()
+    d._rebuild_sphere_now()
+    pump(0.05)
+
+
+def lamps_still():
+    """The same colour under the four lamps, each over its form-zone map."""
+    from PyQt5.QtGui import QFont
+    d = new_panel()
+    d._on_target_changed("base")
+    d._assign_target(QColor("#ea6218"))
+    pump(0.2)
+    S, gap, top, label_h = 200, 16, 30, 34
+    colours = dict(ZONE_COLOURS)
+    out = QImage(4 * S + 5 * gap, top + 2 * S + gap + label_h + 46, QImage.Format_RGB32)
+    out.fill(QColor(24, 26, 31))
+    p = QPainter(out)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    for i, mode in enumerate(LAMPS):
+        set_lamp(d, mode)
+        x = gap + i * (S + gap)
+        img = d._render_sphere().scaled(S, S, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        p.drawImage(x, top, img)
+        zone = QImage(S, S, QImage.Format_ARGB32)
+        zone.fill(QColor(0, 0, 0, 0))
+        eng = d.processor.engine
+        for yy in range(S):
+            for xx in range(S):
+                u, v = -1 + 2 * (xx + 0.5) / S, -1 + 2 * (yy + 0.5) / S
+                if u * u + v * v <= 1.0:
+                    zone.setPixelColor(xx, yy, QColor(*colours[eng.form_zone(u, v)]))
+        p.drawImage(x, top + S + gap, zone)
+        p.setPen(QColor(236, 240, 246))
+        f = QFont("Sans"); f.setPixelSize(15); f.setBold(True); p.setFont(f)
+        p.drawText(x, 0, S, top - 6, Qt.AlignHCenter | Qt.AlignBottom, mode)
+        f.setBold(False); f.setPixelSize(12); p.setFont(f); p.setPen(QColor(170, 178, 192))
+        p.drawText(x, top + 2 * S + gap, S, label_h, Qt.AlignHCenter | Qt.AlignVCenter, LAMP_NOTES[mode])
+    # legend
+    f = QFont("Sans"); f.setPixelSize(12); p.setFont(f)
+    lx, ly = gap, top + 2 * S + gap + label_h + 12
+    for name, rgb in ZONE_COLOURS:
+        p.setPen(QColor(90, 96, 108)); p.setBrush(QColor(*rgb)); p.drawRect(lx, ly, 12, 12)
+        p.setPen(QColor(200, 206, 216))
+        w = p.fontMetrics().horizontalAdvance(name)
+        p.drawText(lx + 18, ly + 11, name)
+        lx += 18 + w + 22
+    p.end()
+    set_lamp(d, "Sun")
+    save(out, "Lumina_lamps.png")
+    d.close()
+
+
+def zones_gif(fps=12):
+    """The lemon sweeps from the highlight to the far rim under each lamp,
+    and the line under the sphere names each zone it crosses."""
+    d = new_panel()
+    d._on_target_changed("base")
+    d._assign_target(QColor("#ea6218"))
+    d._recent.set_colors([])
+    pump(0.2)
+    sw = d._sphere
+    frames_dir = tempfile.mkdtemp(prefix="lumina-zones-")
+    frames = []
+    top = d.light_type_row.mapTo(d, QPoint(0, 0)).y() - 6
+    bottom = d._readout.mapTo(d, QPoint(0, d._readout.height())).y() + 8
+
+    def shot(hold=1):
+        img = grab(d).copy(0, top, d.width(), bottom - top)
+        for _ in range(hold):
+            path = os.path.join(frames_dir, "f%04d.png" % len(frames))
+            img.save(path)
+            frames.append(path)
+
+    def sphere_point(u, v):
+        ox, oy, dia = sw._sphere_geometry()
+        return QPointF(ox + (u + 1) * dia / 2.0, oy + (v + 1) * dia / 2.0)
+
+    # From the highlight (toward the light, upper right) across the form to
+    # the rim facing away from it (lower left).
+    az = math.radians(304.0)
+    lx, ly = math.cos(az), math.sin(az)
+    path = [(lx * t, ly * t) for t in [0.55 - i * 0.07 for i in range(22)]]
+    for mode in LAMPS:
+        set_lamp(d, mode)
+        sw._sample(QPointF(-500.0, -500.0))
+        pump(0.05)
+        shot(hold=5)                                         # the lamp clicks over
+        for u, v in path:
+            sw._sample(sphere_point(u, v))
+            pump(1.0 / fps)
+            shot()
+        shot(hold=6)
+    sw._sample(QPointF(-500.0, -500.0))
+    set_lamp(d, "Sun")
+
+    out = os.path.join(OUT, "lumina_zones.gif")
+    pattern = os.path.join(frames_dir, "f%04d.png")
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-framerate", str(fps), "-i", pattern,
+                    "-lavfi", "scale=%d:-1:flags=lanczos,split [a][b]; [a] palettegen=stats_mode=full:max_colors=256 [p];"
+                    " [b][p] paletteuse=dither=sierra2_4a" % 360,
+                    "-loop", "0", out], check=True)
+    print("wrote", os.path.relpath(out, ROOT), "%d frames, %.1f s, %d KB" % (
+        len(frames), len(frames) / float(fps), os.path.getsize(out) // 1024))
+    shutil.rmtree(frames_dir, ignore_errors=True)
+    d.close()
+
+
 # ---------------------------------------------------------------- GIF
 def arrow(p, pos):
     """A plain arrow pointer, drawn where a click lands off the sphere."""
@@ -289,8 +409,10 @@ def main(argv):
     use_krita_icon(args.icon)
     try:
         stills()
+        lamps_still()
         if not args.no_gif:
             demo_gif()
+            zones_gif()
     finally:
         shutil.rmtree(_CONFIG, ignore_errors=True)
 

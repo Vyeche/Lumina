@@ -849,7 +849,7 @@ class ColorSampler(QWidget):
 
 class SparkleBurst(QWidget):
     """A one-shot burst of sparkles, played around the target dot when the
-    user selects Shade, Base or High. Transparent to the mouse; parented to
+    user selects Shade, Base or Light. Transparent to the mouse; parented to
     the panel and centred on the dot so the sparkles are not clipped."""
 
     SIZE = 96
@@ -1167,7 +1167,7 @@ class RecentColors(QWidget):
             p.setPen(QColor(200, 208, 222))
             p.drawText(QRectF(0, 0, self.width(), 14), Qt.AlignLeft | Qt.AlignVCenter,
                        "Recent picks" if self._colors else
-                       "Recent picks -- click the sphere to collect colours")
+                       "Recent picks: click the sphere to collect colours")
             if self._colors:
                 p.setPen(QColor(150, 160, 178))
                 p.drawText(self._clear_rect(), Qt.AlignRight | Qt.AlignVCenter, "Clear")

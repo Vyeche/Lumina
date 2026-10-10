@@ -111,6 +111,9 @@ class TonalVariantEngine(ColorEngine):
         mixer = self.mixer_mode
         spec_max = self.spec_max
         spec_gain = self.SPEC_GAIN
+        spec_spread = self._area_spec_spread()
+        spec_spread_inv = 1.0 / spec_spread
+        spec_gain *= spec_spread_inv * spec_spread_inv
         tonal_lut = self._tonal_lut()
         tonal_last = len(tonal_lut) - 1
         ambient_base = self.ambient * self.AMBIENT_SCALE
@@ -250,6 +253,8 @@ class TonalVariantEngine(ColorEngine):
 
                 hx, hy, hz = self._light_half[row][col]
                 ndh = max(0.0, nx * hx + ny * hy + nz * hz)
+                if spec_spread != 1.0:
+                    ndh = math.cos(math.acos(ndh if ndh < 1.0 else 1.0) * spec_spread_inv)
                 knee_curve = self._smoothstep(spec_knee, 1.0, ndh)
                 spec_pos = max(0.0, min(1.0, ndh)) * spec_last
                 i0 = int(spec_pos)

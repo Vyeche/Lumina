@@ -12,6 +12,11 @@ cel-shaded bands, pick the smooth falloff; the three targets and the shading
 controls work either way, and the sphere shows you which one you are actually
 looking at.
 
+<p align="center"><img src="images/lumina_short.gif" width="400" alt="A beach still life painted in Krita with real brushes: every colour is picked off the Lumina sphere, which names each form zone (Light, Halftone, Terminator, Core shadow, Reflected light, Highlight), then laid in on a ball, a coconut, a crate and a bucket"></p>
+
+Painted in Krita with its own brushes, every colour read off the Lumina sphere
+zone by zone. Lumina stays docked beside the canvas the whole time.
+
 ![Lumina at work: a flat poster-style sunset beach, the lighting sets the plugin derived from it painted as a palette strip, and the panel on the right](images/Lumina_feature.png)
 
 That shot is the two worlds side by side. The beach is flat graphic work —
@@ -34,12 +39,17 @@ switched on and off](images/lumina_demo.gif)
 - **Calibrated shading** — fitted against a reference lighting app: shadows
   that stay rich and build into a core, a highlight that sits toward the light,
   reflected light on the far edge. Pure Python, no third-party dependencies.
-- **Three linked targets** — *Shade*, *Base* and *High*. Pick a base and the
+- **Three linked targets** — *Shade*, *Base* and *Light*. Pick a base and the
   light and shadow are derived around it (in OKLCH); edit any of the three with
-  perceptual Hue / Saturation / Light sliders, and undo / redo the changes.
+  perceptual Hue / Saturation / Value sliders, and undo / redo the changes.
 - **The lemon sampler** — rests on the sphere under the pointer, shows the
   colour and hex under it, and sends a click straight to Krita's brush. Picks
   collect in **Recent picks** (pin the favourites).
+- **Form zones** — the readout under the sphere names the zone under the
+  pointer: Highlight, Light, Halftone, Terminator, Core shadow or Reflected
+  light, so you can see where each band falls.
+- **Four lamps** — Sun, Point (a nearby bulb), Spot (a soft-edged beam) and
+  Area (a broad panel: soft edge, broad highlight); the zones follow the lamp.
 - **Krita's colour, both ways** — an eyedropper pick or any colour you choose in
   Krita replaces the selected target, in the active layer's colour space
   (Display P3 layers included); Lumina's picks never come back as new targets.
@@ -48,7 +58,13 @@ switched on and off](images/lumina_demo.gif)
   remembered across restarts.
 - **Settings persistence** — your setup is saved as you work and restored next
   time Krita opens; light direction, highlight size, render quality, sticky
-  distance and a compact mode live under the gear.
+  distance and a compact mode live under the gear. After an update, values you
+  never changed move to the new defaults; your own stay as you set them.
+- **Responsive** — the full-quality sphere renders in the background, so
+  sliders and animations never stall, and a colour change redraws about three
+  times faster than before (bit-identical output).
+
+![The same colour under the four lamps, Sun, Point, Spot and Area, each above a map of its form zones](images/Lumina_lamps.png)
 
 ## Installation
 
@@ -60,7 +76,7 @@ import it directly, no need to extract anything. Then restart Krita.
 
 ```bash
 DEPLOY="$HOME/.var/app/org.kde.krita/data/krita/pykrita"
-rsync -a --delete --exclude='__pycache__' --exclude='lumina_log.txt' src/Lumina/ "$DEPLOY/Lumina/"
+rsync -a --delete --exclude='__pycache__' --exclude='.pytest_cache' --exclude='lumina_log.txt' src/Lumina/ "$DEPLOY/Lumina/"
 cp src/Lumina.desktop "$DEPLOY/"
 ```
 
@@ -74,8 +90,8 @@ the plugin under Krita's own Python.
 ## Usage
 
 1. Open the **Lumina** docker.
-2. Pick a target — *Shade*, *Base* or *High* — by its glyph or its colour swatch.
-3. Adjust **Hue**, **Saturation** and **Light** for that target, or pick a colour
+2. Pick a target — *Shade*, *Base* or *Light* — by its colour dot or its name.
+3. Adjust **Hue**, **Saturation** and **Value** for that target, or pick a colour
    in Krita (the eyedropper button, a colour selector) to replace it.
 4. **Click and drag** on the sphere to sample a colour. Krita's foreground
    (brush) colour updates immediately; the sphere itself is never changed by
@@ -157,10 +173,10 @@ scripting module (modules of the plugin itself in *italics*):
 |---|---|
 | `color_engine.py` | `math`, `time`, `logging`, `typing` |
 | `derivation.py` | `math` |
-| `color_processor.py` | `PyQt5`, `collections`, `importlib`, `os`, `time`, `typing`, *`color_engine`* |
+| `color_processor.py` | `PyQt5`, `collections`, `copy`, `importlib`, `os`, `time`, `typing`, *`color_engine`* |
 | `color_controls.py` | `PyQt5`, `math`, `random`, `time`, `typing`, *`derivation`*, *`tooltip`*, *`typed_entry`* |
 | `sphere_widget.py` | `PyQt5`, `math`, `typing`, *`lumina_logging`* |
-| `sphere_docker.py` | `PyQt5`, `krita`, `json`, `math`, `os`, `time`, `typing`, `weakref`, *the modules above* |
+| `sphere_docker.py` | `PyQt5`, `krita`, `concurrent.futures`, `json`, `math`, `os`, `sys`, `threading`, `time`, `typing`, `weakref`, *the modules above* |
 
 Every one of those is either the Python standard library or shipped with Krita.
 There is no numpy, no colour-science library, no third-party package of any

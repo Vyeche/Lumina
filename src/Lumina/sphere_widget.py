@@ -82,6 +82,7 @@ class SphereWidget(QWidget):
         self._hover_color = None      # QColor currently under cursor
         self._brush_cb = None        # Callable[QColor, None] while dragging
         self._hover_cb = None          # Callable[QColor, None] on cursor move
+        self.hover_uv = None           # sphere coords of the hovered pixel
         self._pointer = None          # QPointF of the picker marker (widget coords)
         self._pointer_down = False    # True while the pointer is being dragged
         self._show_pointer = True     # settings toggle for the marker
@@ -406,6 +407,7 @@ class SphereWidget(QWidget):
         """
         sx, sy = self._to_sphere_coords(point)
         if sx is None or sy is None:
+            self.hover_uv = None
             if self._hover_color is not None or self._pointer is not None:
                 self._hover_color = None
                 self._pointer = None
@@ -424,6 +426,12 @@ class SphereWidget(QWidget):
         except Exception:
             return
         self._hover_color = pixel
+        # Where on the sphere, in its own [-1, 1] coordinates (v down), so the
+        # docker can name the form zone under the pointer.
+        rres = (self._image.width() or self._image.height()) if self._image is not None else 0
+        if rres > 1:
+            self.hover_uv = (-1.0 + 2.0 * sx / float(rres - 1),
+                             -1.0 + 2.0 * sy / float(rres - 1))
         # Remember where the pointer is, in widget coordinates.
         # Use the same inset sphere rectangle as paintEvent, not the full widget
         # side: the image is drawn inside side - 2*SPHERE_MARGIN.

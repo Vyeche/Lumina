@@ -8,7 +8,7 @@ This document covers common issues encountered during Lumina plugin development 
 3. [Display and Rendering Issues](#display-and-rendering-issues)
 4. [Color Management Issues](#color-management-issues)
 5. [Mouse Event Issues](#mouse-event-issues)
-6. [Krita Integration Issues](#krita-integration-issues)
+6. [Krita Integration Issues](#krita-integration-issues) (including terminal warnings)
 7. [Performance Issues](#performance-issues)
 
 ---
@@ -523,6 +523,25 @@ file open, so the importer can always delete the directory.
 
 ---
 
+### Issue 2b: Terminal shows `No such signal QQuickPalette::destroyed(QObject *)`
+
+**Symptom:** blocks of four lines (`QQuickPalette`, `QQuickIcon`, `QQuickFontValueType`, `QQmlSizeValueType`) in the terminal Krita was started from.
+
+**Cause:** Python code walked Krita's whole main window with `findChildren`. PyQt wraps every object it visits, and the objects inside Krita's QML panels (Text Properties) print this as they are wrapped. Before #61, Lumina did this on every colour pick.
+
+**Fix:** search only the part of the window you need: the central area for canvases, or a specific dock taken from `Krita.instance().dockers()`. `QApplication.allWidgets()` does not trigger it.
+
+**Krita's own lines (not from Lumina, harmless):**
+
+| Message | Source |
+|---|---|
+| `QIBusPlatformInputContext: invalid portal bus` | The flatpak can't reach the IBus input-method service. |
+| `QObject::startTimer: Timers cannot have negative intervals` | Krita's startup, before Python loads. |
+| `qrc:/OpenTypeFeatureDelegate.qml ... cannot find any window to open popup in` | The OpenType features panel creating a tooltip early. |
+| `The imageRectInWidgetPixels topLeft() does not match the documentOffsetF!` | Krita's canvas checking itself as a document opens. |
+
+---
+
 ### Issue 3: CanvasChange Not Called
 
 **Symptoms**:
@@ -599,41 +618,16 @@ def create_docker():
 
 ### Issue 1: Slow Sphere Rendering
 
-**Symptoms**:
-- Lag when dragging on sphere
-- UI unresponsive during rendering
+**Symptoms:** the panel stalls after a slider release, or the sharp sphere takes a while to arrive.
 
-**Root Cause**:
-Generating image on every mouse move instead of caching.
+**How it works now:**
+- **Previews:** while a slider moves, the sphere previews at 96 px (~25 ms).
+- **Full render:** the full-quality render then runs on a worker thread and is cancelled if anything changes first (#49).
+- **Pipeline:** the render itself is the restructured pipeline (#56, see ARCHITECTURE.md → Render pipeline). A colour change at 288 px is ~100 ms; changes to lighting and the light cost more.
 
-**Solution**:
-```python
-class SphereColorProcessor:
-    def __init__(self):
-        self._sphere_image = None
-        # Pre-compute normal and diffuse maps
-        self._normal_map = self._generate_normal_map()
-        self._diffuse_map = self._generate_diffuse_map()
-    
-    def generate_sphere_image(self, base_color, width, height):
-        # Only generate if parameters changed
-        if (self._sphere_image is None or 
-            self._sphere_image.width() != width or
-            self.base_color != base_color):
-            self._sphere_image = self._render(width, height)
-        
-        return self._sphere_image
-```
-
-**Optimization**:
-- Use lower resolution for testing (64x64)
-- Pre-compute normal maps once
-- Cache generated images
-
-**Verification**:
-- ✅ Smooth drag response
-- ✅ No lag on mouse movement
-- ✅ Consistent FPS
+**If it is slow:**
+- Check `lumina_log.txt` for `RENDER_DONE ... bg=1`. Full renders should be in the background, and a `size=288 ... bg=0` means one ran on the UI thread.
+- Lower **Quality** in Settings for a smaller full render.
 
 ---
 

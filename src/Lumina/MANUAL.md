@@ -52,7 +52,7 @@ while you are editing.
 Under each block sits its **hex value**. Click a hex value to copy it to the
 clipboard. The current box shows the **selected target** (shadow, base or
 highlight), and the toggle beside it names it — **EDIT SHADE**, **EDIT BASE** or
-**EDIT HIGH**. It unlocks typing (green **DONE** while open): type a hex color and
+**EDIT LIGHT**. It unlocks typing (green **DONE** while open): type a hex color and
 press Enter. For the base, the light and shadow are derived from it, like
 eyedropping; a shadow or highlight takes the color exactly as typed.
 The previous box is display plus copy only. The
@@ -63,7 +63,7 @@ lock state is saved with your settings.
 **A target changes** (and with it the sphere) in three ways:
 
 - **Typing a hex** into the box under the active swatch: it edits the selected
-  target — the toggle reads **EDIT SHADE**, **EDIT BASE** or **EDIT HIGH**.
+  target — the toggle reads **EDIT SHADE**, **EDIT BASE** or **EDIT LIGHT**.
 - **Krita's colour** — an eyedropper pick or any change in Krita's colour
   selectors replaces the selected target, like a switch.
 - **The Hue and Saturation sliders** edit the selected target (Light edits the
@@ -90,7 +90,7 @@ A sphere lit by the three target colors. It grows with the panel, from 200 up
 to 340 px. **The color sampler** is a lemon that rests on the sphere under your
 pointer (the pointer itself hides while it is there). It lies along the curve,
 is filled with the exact color being read, and shows that color's hex in a pill
-beneath it; under the target dots it reads as **H / S / L** in the sliders' own units. A click makes it pop;
+beneath it; just under the sphere it reads as **H / S / V** in the sliders' own units, followed by the **form zone** under the pointer: *Highlight*, *Light*, *Halftone*, *Terminator*, *Core shadow* or *Reflected light*. The zones follow the lamp, so switching Point / Sun / Spot / Area shows where each band moves. A click makes it pop;
 while you hold the button it stays a little larger, and if you hold on long
 enough it starts to sweat (a faint ring fills round it while you wait).
 
@@ -111,19 +111,19 @@ Directly above the sphere, four icons choose the lamp model driving the light:
 | **Haloed bulb** | **Point** — nearby lamp; brightness falls off with distance. |
 | **Ring with rays** | **Sun** — distant parallel light; no falloff. |
 | **Cone** | **Spot** — cone beam with a soft edge. |
-| **Panel** | **Area** — broad panel; soft wrap. |
+| **Panel** | **Area** — a broad panel: as bright as Point, with a soft, wide edge into the shadow and a broader, softer highlight. |
 
 ### Target dots
 
-Below the sphere, three small icons pick which color the Hue and Saturation sliders edit. They share one visual language — a dark-to-bright progression on the same circle:
+Below the sphere, three color dots pick which color the Hue, Saturation and Value sliders edit. Each dot shows the color it holds, captioned with its name:
 
 | Dot | Meaning |
 |---|---|
-| **Half-dark circle** | **Shadow** — the hue of the darkest areas. |
-| **Plain ring** | **Base** — the color of the object. |
-| **Ring with rays** | **Light** — the highlight color; also drives how bright the lit side gets. |
+| **Shade** | The hue of the darkest areas. |
+| **Base** | The color of the object. |
+| **Light** | The highlight color; also drives how bright the lit side gets. |
 
-Each pair is captioned **Shade**, **Base** or **High**. The selected target shows on its **color swatch** beside the icon, which grows and takes a white rim, and its caption lights up; selecting one sparkles. The icons themselves never change.
+Click a dot or its caption to select it. The selected dot grows and takes a white rim, its caption lights up, and selecting one sparkles.
 
 The arrows at the two ends of the row **undo** and **redo** changes to the three
 target colors (up to 50 steps; a whole slider drag counts as one). Undo never
@@ -152,7 +152,7 @@ half-typed text.
 |---|---|---|
 | **Hue** | 0–359 | Perceptual hue (OKLCH degrees) of the **selected target**, like the reference lighting app's: equal steps look equally different. Fixed full-strength rainbow track: each hue at its most vivid color, like Krita's hue strip. |
 | **Saturation** | 0–100 | Vividness of the selected target: 100 is the most vivid color the gamut holds at that hue and lightness. The track re-renders as grey → full color at the current hue. |
-| **Light** | 0–100 | Perceived lightness of the **base** target only; hidden for shadow and light, which are derived from the base. |
+| **Value** | 0–100 | Perceived lightness (how light or dark) of the **base** target only; hidden for shadow and light, which are derived from the base. |
 | **Contrast** | 0–200, default 100 (middle) | Tonal separation around the midtone. Above 100 deepens it, below 100 softens it; pure black and white are always preserved. It does **not** change a color. |
 | **Intensity** (primary) | 0–200, default 100 | Scene light level: scales Sun, Point, Spot and Area together. Mirrors the Advanced **Intensity** row — one value, two handles. |
 
@@ -296,6 +296,11 @@ Two things are deliberately *not* saved: the colour you last picked for
 painting (that is a per-session brush choice) and which target the sliders are
 currently editing. **Reset all** clears the saved file's contents too, so the
 next launch starts clean.
+
+**After an update**, values you never changed move to the new defaults the
+first time Krita opens (for example the brighter highlight and the recalibrated
+light direction from 2.7.0); anything you set yourself is kept exactly. Press
+**Reset all** if you want every value back at the defaults.
 
 ---
 

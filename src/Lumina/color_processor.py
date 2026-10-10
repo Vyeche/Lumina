@@ -206,9 +206,12 @@ class SphereColorProcessor:
         else:
             self.last_cache_hit = False
 
-        pixels = self.engine.render(base, w, h)
         t_buf = time.perf_counter()
-        raw = self._build_buffer(pixels, w, h)
+        raw = self.engine.render_bgra(base, w, h)
+        if raw is None:                    # an engine without the fast path
+            pixels = self.engine.render(base, w, h)
+            t_buf = time.perf_counter()
+            raw = self._build_buffer(pixels, w, h)
         buf_ms = (time.perf_counter() - t_buf) * 1000.0
 
         if full_quality:
@@ -278,7 +281,8 @@ class SphereColorProcessor:
         "_light_vector", "_diffuse_cache", "_shadow_cache", "_spec_cache",
         "_light_cache_key_value", "_light_ldir", "_light_illum", "_light_ndl",
         "_light_half", "_material_cache_key_value", "_material_body",
-        "_timings", "_last_timing_log", "_cancel"))
+        "_timings", "_last_timing_log", "_cancel",
+        "_fast_geo_cache", "_fast_light", "_fast_width"))
 
     def full_render_job(self, base_color, width, height):
         """Snapshot what a full-quality render needs, on the UI thread.
@@ -321,12 +325,14 @@ class SphereColorProcessor:
         try:
             if engine._grid_width == w and engine._grid_height == h:
                 engine._compute_shading()      # light may have moved since
-            pixels = engine.render(base, w, h)
+            raw = engine.render_bgra(base, w, h)
+            if raw is None:
+                raw = self._build_buffer(engine.render(base, w, h), w, h, engine)
         except RenderCancelled:
             return None
         finally:
             engine._cancel = None
-        return bytes(self._build_buffer(pixels, w, h, engine))
+        return bytes(raw)
 
     def store_full_render(self, job, raw):
         """Back on the UI thread: cache a finished job, return its QImage."""

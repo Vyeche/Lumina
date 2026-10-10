@@ -76,14 +76,17 @@ def _bytes_proc(monkeypatch):
 
 
 def _count_engine_renders(proc):
+    """Count real renders, whichever entry point the processor uses
+    (render_bgra since #56; render for engines without the fast path)."""
     calls = []
-    orig = proc.engine.render
+    for name in ("render", "render_bgra"):
+        orig = getattr(proc.engine, name)
 
-    def counting(base, w, h):
-        calls.append((tuple(base), w, h))
-        return orig(base, w, h)
+        def counting(base, w, h, _orig=orig):
+            calls.append((tuple(base), w, h))
+            return _orig(base, w, h)
 
-    proc.engine.render = counting
+        setattr(proc.engine, name, counting)
     return calls
 
 

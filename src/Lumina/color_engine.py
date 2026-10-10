@@ -54,7 +54,6 @@ class ColorEngine:
     # the user-controlled intensity multiplier.
     LIGHT_DISTANCE = 3.0
     REFERENCE_POINT_FLUX = 4.0 * math.pi * (LIGHT_DISTANCE ** 2)
-    REFERENCE_AREA_POWER = REFERENCE_POINT_FLUX
 
     # Blender-like spot defaults. spot_size is a full cone angle; the shader
     # compares against the corresponding half-angle around the center axis.
@@ -64,10 +63,11 @@ class ColorEngine:
     SPOT_OUTER_DEG = 35.0
     SPOT_BLEND = 0.25
 
-    # Nominal area emitter size. NOTE: the current center-sampled approximation
-    # divides by area then multiplies back, so AREA_SIZE has no intensity
-    # effect yet. Kept at 2.0 as the future default for true multi-sample
-    # Square/Rectangle/Disk integration (spec spread, shadow softness).
+    # Side of the square area emitter, in sphere radii, at LIGHT_DISTANCE. It
+    # sets how soft the Area light is: the panel is treated as a disc of the
+    # same area, and its angular size spreads the terminator into a penumbra
+    # (issue #53). It used to have no effect at all (divided out and
+    # multiplied back), and the light was ~18x too bright.
     AREA_SIZE = 2.0
 
     AMBIENT_SCALE = 1.2
@@ -231,7 +231,7 @@ class ColorEngine:
     # RENDER_ALGORITHM_VERSION whenever any class-level constant or pipeline
     # stage above changes output pixels; GEOMETRY_ALGORITHM_VERSION covers
     # the normal/mask/coverage grids, which derive purely from dimensions.
-    RENDER_ALGORITHM_VERSION = 6  # #45: highlight peak refit
+    RENDER_ALGORITHM_VERSION = 7  # #53: Area light normalised and soft
     GEOMETRY_ALGORITHM_VERSION = 1
 
     DARK_FALLOFF = 0.80
@@ -859,33 +859,140 @@ class ColorEngine:
         return ldir, point_energy * cone
 
     def _area_illuminance(self, surface_x: float, surface_y: float, surface_z: float) -> Tuple[Normal, float]:
-        # Center-point approximation of a square Blender-like area emitter.
-        # The emitter normal faces the origin.
-        lx = self._light_vector[0] * self.LIGHT_DISTANCE
-        ly = self._light_vector[1] * self.LIGHT_DISTANCE
-        lz = self._light_vector[2] * self.LIGHT_DISTANCE
+        """A square panel facing the sphere, AREA_SIZE across, at the light.
 
-        vx = lx - surface_x
-        vy = ly - surface_y
-        vz = lz - surface_z
+        Brightness is the Point light's (inverse square, the same reference
+        flux) times the panel's own cosine toward the surface, so Area and
+        Point light the sphere equally hard where both reach.
+
+        Softness: the panel, as a disc of equal area, spans an angular radius
+        a seen from the surface, so it keeps lighting a little past the point
+        where its centre sets. Over the penumbra |cos| < sin a the cosine is
+        replaced by (cos + sin a)^2 / (4 sin a), the standard horizon
+        approximation for a disc light: smooth, meeting plain cos at the
+        lit edge and 0 at the far one. The light direction handed back is
+        bent toward the normal to carry that cosine, so N.L everywhere
+        downstream (tonal path, shadow hue, specular) sees the soft edge.
+        The sphere is the unit sphere at the origin, so the surface point is
+        its own normal.
+        """
+        lv = self._light_vector
+        dist = self.LIGHT_DISTANCE
+        vx = lv[0] * dist - surface_x
+        vy = lv[1] * dist - surface_y
+        vz = lv[2] * dist - surface_z
         distance = math.sqrt(vx * vx + vy * vy + vz * vz)
         if distance <= 1.0e-6:
             return (0.0, 0.0, 1.0), 0.0
+        lx, ly, lz = vx / distance, vy / distance, vz / distance
+        # Panel facing the origin: its cosine toward this surface point.
+        cos_emit = lv[0] * lx + lv[1] * ly + lv[2] * lz
+        if cos_emit <= 0.0:
+            return (lx, ly, lz), 0.0
+        flux = self.REFERENCE_POINT_FLUX * self.light_intensity
+        illuminance = flux / (4.0 * math.pi * (distance * distance + 0.01)) * cos_emit
 
-        ldir = (vx / distance, vy / distance, vz / distance)
-        lamp_to_surface = (-ldir[0], -ldir[1], -ldir[2])
-        emitter_normal = (-self._light_vector[0], -self._light_vector[1], -self._light_vector[2])
-        cos_alpha = max(0.0, emitter_normal[0] * lamp_to_surface[0]
-                              + emitter_normal[1] * lamp_to_surface[1]
-                              + emitter_normal[2] * lamp_to_surface[2])
+        nx, ny, nz = surface_x, surface_y, surface_z
+        cos_c = nx * lx + ny * ly + nz * lz
+        radius = self.AREA_SIZE / math.sqrt(math.pi)          # equal-area disc
+        sin_a = min(0.95, radius / math.sqrt(distance * distance + radius * radius))
+        if cos_c >= sin_a or sin_a <= 0.0:
+            return (lx, ly, lz), illuminance
+        if cos_c <= -sin_a:
+            return (lx, ly, lz), 0.0
+        cos_soft = (cos_c + sin_a) * (cos_c + sin_a) / (4.0 * sin_a)
+        # Bend the direction in the plane of the normal and the panel so that
+        # N.L equals the soft cosine.
+        tx, ty, tz = lx - cos_c * nx, ly - cos_c * ny, lz - cos_c * nz
+        tlen = math.sqrt(tx * tx + ty * ty + tz * tz)
+        if tlen <= 1.0e-9:
+            return (lx, ly, lz), illuminance
+        sin_soft = math.sqrt(max(0.0, 1.0 - cos_soft * cos_soft))
+        bent = (cos_soft * nx + sin_soft * tx / tlen,
+                cos_soft * ny + sin_soft * ty / tlen,
+                cos_soft * nz + sin_soft * tz / tlen)
+        return bent, illuminance
 
-        area = max(0.001, self.AREA_SIZE * self.AREA_SIZE)
-        power_density = (self.REFERENCE_AREA_POWER * self.light_intensity) / area
-        illuminance = power_density * cos_alpha / (distance * distance + 0.01)
-        # Calibrate the larger area-light denominator back to the same visual
-        # energy scale used by the reference point light.
-        illuminance *= area
-        return ldir, illuminance
+    def _area_spec_spread(self) -> float:
+        """How much wider the highlight is under the Area light (1 = Point's).
+
+        A panel reflects as a patch, not a point: its highlight is the
+        surface's own lobe blurred by the panel's angular size. With the lobe
+        ndh ** n about sqrt(2 / n) radians wide and the panel's angular
+        radius a (as a disc of equal area, seen from LIGHT_DISTANCE), the two
+        add in quadrature, so the lobe stretches by
+        f = sqrt(1 + a^2 n / 2). The same light spread wider is dimmer: the
+        material stage divides the peak by f^2.
+        """
+        if self.light_type != "Area":
+            return 1.0
+        radius = self.AREA_SIZE / math.sqrt(math.pi)
+        a = math.atan2(radius, self.LIGHT_DISTANCE)
+        n = max(1.0, float(self.shininess))
+        return math.sqrt(1.0 + a * a * n / 2.0)
+
+    # Form zones, the painter's names for the bands a light lays over a form,
+    # named on hover so the artist can see where each one sits under the
+    # current lamp (issue #53). Thresholds are in effective N.L: the light
+    # actually arriving (a Spot's beam, an Area's soft edge), not geometry.
+    ZONE_HIGHLIGHT = 0.35       # share of the specular lobe's peak
+    ZONE_LIGHT = 0.55           # effective N.L at and above: the lit plane
+    ZONE_HALFTONE = 0.12        # down to here: turning away from the light
+    ZONE_TERMINATOR = -0.12     # signed N.L down to here: the shadow edge
+    ZONE_REFLECT = 0.35         # share of the reflected band's full strength
+
+    def form_zone(self, u: float, v: float) -> str:
+        """Name the form zone at sphere coordinates (u, v) in [-1, 1], v down:
+        Highlight, Light, Halftone, Terminator, Core shadow or Reflected light.
+        """
+        r2 = u * u + v * v
+        if r2 >= 1.0:
+            k = 0.999 / math.sqrt(r2)
+            u, v, r2 = u * k, v * k, 0.998
+        nz = math.sqrt(1.0 - r2)
+        nx, ny = u, v
+        ldir, illum = self._light_for_surface(nx, ny, nz)
+        cos_l = nx * ldir[0] + ny * ldir[1] + nz * ldir[2]
+        lit = illum * max(0.0, cos_l)
+        if lit > 0.0:
+            hx, hy, hz = self._normalize3(ldir[0], ldir[1], ldir[2] + 1.0)
+            toward = self.SPEC_TOWARD_LIGHT
+            if toward > 0.0:
+                hx, hy, hz = self._normalize3(hx + (ldir[0] - hx) * toward,
+                                              hy + (ldir[1] - hy) * toward,
+                                              hz + (ldir[2] - hz) * toward)
+            ndh = max(0.0, nx * hx + ny * hy + nz * hz)
+            spread = self._area_spec_spread()
+            if spread != 1.0:
+                ndh = math.cos(math.acos(min(1.0, ndh)) / spread)
+            lobe = self._spec_from_lut(ndh) * self._smoothstep(
+                max(self.SPEC_KNEE_MIN, min(self.SPEC_KNEE_MAX, self.spec_knee)), 1.0, ndh)
+            if self.spec_max > 0.0 and lobe * min(1.0, lit) >= self.ZONE_HIGHLIGHT:
+                return "Highlight"
+            if lit >= self.ZONE_LIGHT:
+                return "Light"
+            if lit >= self.ZONE_HALFTONE:
+                return "Halftone"
+        # Signed N.L against the lamp's own direction: where the form turns
+        # past the light. Outside a Spot's beam it is shadow however it faces.
+        if cos_l >= self.ZONE_TERMINATOR and (illum > 0.0 or self.light_type != "Spot"):
+            return "Terminator"
+        if self.REFLECT_STRENGTH > 0.0:
+            edge = 1.0 - nz
+            span = self.REFLECT_END - self.REFLECT_START
+            if span > 0.0:
+                t = max(0.0, min(1.0, (edge - self.REFLECT_START) / span))
+                band = t * t * (3.0 - 2.0 * t)
+            else:
+                band = edge ** self.REFLECT_POWER
+            lv = self._light_vector
+            lxy, nxy = math.hypot(lv[0], lv[1]), math.hypot(nx, ny)
+            if self.REFLECT_SPREAD > 0.0 and lxy > 1e-6 and nxy > 1e-6:
+                away = -(nx * lv[0] + ny * lv[1]) / (lxy * nxy)
+                band *= max(0.0, away) ** self.REFLECT_SPREAD
+            if band >= self.ZONE_REFLECT:
+                return "Reflected light"
+        return "Core shadow"
 
     def _light_for_surface(self, surface_x: float, surface_y: float, surface_z: float) -> Tuple[Normal, float]:
         if self.light_type == "Sun":
@@ -1134,6 +1241,36 @@ class ColorEngine:
         ndls: List[List[float]] = []
         halfs: List[List[Normal]] = []
         toward = self.SPEC_TOWARD_LIGHT
+        if self.light_type == "Sun":
+            # Parallel light: direction, illuminance and half vector are the
+            # same everywhere, so they are computed once (same expressions
+            # as below, same values) and only N.L varies per pixel.
+            ldir, illuminance = self._sun_illuminance()
+            lx, ly, lz = ldir
+            hx, hy, hz = self._normalize3(lx, ly, lz + 1.0)
+            if toward > 0.0:
+                hx, hy, hz = self._normalize3(hx + (lx - hx) * toward,
+                                              hy + (ly - hy) * toward,
+                                              hz + (lz - hz) * toward)
+            half = (hx, hy, hz)
+            out_dir, out_half = (0.0, 0.0, 1.0), (0.0, 0.0, 1.0)
+            for row in range(height):
+                self._check_cancel()
+                mrow = self._mask_grid[row]
+                nrm_row = self._normal_grid[row]
+                ndls.append([max(0.0, n[0] * lx + n[1] * ly + n[2] * lz) if m else 0.0
+                             for n, m in zip(nrm_row, mrow)])
+                ldirs.append([ldir if m else out_dir for m in mrow])
+                illums.append([illuminance if m else 0.0 for m in mrow])
+                halfs.append([half if m else out_half for m in mrow])
+            self._light_ldir = ldirs
+            self._light_illum = illums
+            self._light_ndl = ndls
+            self._light_half = halfs
+            self._light_cache_key_value = key
+            return
+        light_for = self._light_for_surface
+        sqrt = math.sqrt
         for row in range(height):
             self._check_cancel()
             lrow: List[Normal] = []
@@ -1152,16 +1289,29 @@ class ColorEngine:
                     continue
                 x, y, z = pos_row[col]
                 nx, ny, nz = nrm_row[col]
-                ldir, illuminance = self._light_for_surface(x, y, z)
-                ndl = max(0.0, nx * ldir[0] + ny * ldir[1] + nz * ldir[2])
+                ldir, illuminance = light_for(x, y, z)
+                lx, ly, lz = ldir
+                ndl = nx * lx + ny * ly + nz * lz
+                ndl = ndl if ndl > 0.0 else 0.0
                 # Blinn-Phong halfway vector H = normalize(L + V) with fixed
                 # V=(0,0,1). Depends only on the light, so it lives in the
                 # light cache instead of costing a sqrt per material pixel.
-                hx, hy, hz = self._normalize3(ldir[0], ldir[1], ldir[2] + 1.0)
+                # (_normalize3 inlined, same arithmetic: #56.)
+                hz0 = lz + 1.0
+                length = sqrt(lx * lx + ly * ly + hz0 * hz0)
+                if length <= 1.0e-12:
+                    hx, hy, hz = 0.0, 0.0, 1.0
+                else:
+                    hx, hy, hz = lx / length, ly / length, hz0 / length
                 if toward > 0.0:
-                    hx, hy, hz = self._normalize3(hx + (ldir[0] - hx) * toward,
-                                                  hy + (ldir[1] - hy) * toward,
-                                                  hz + (ldir[2] - hz) * toward)
+                    ax = hx + (lx - hx) * toward
+                    ay = hy + (ly - hy) * toward
+                    az = hz + (lz - hz) * toward
+                    length = sqrt(ax * ax + ay * ay + az * az)
+                    if length <= 1.0e-12:
+                        hx, hy, hz = 0.0, 0.0, 1.0
+                    else:
+                        hx, hy, hz = ax / length, ay / length, az / length
                 hrow.append((hx, hy, hz))
                 lrow.append(ldir)
                 erow.append(illuminance)
@@ -1218,6 +1368,12 @@ class ColorEngine:
         mixer = self.mixer_mode
         spec_max = self.spec_max
         spec_gain = self.SPEC_GAIN
+        # Area light: a broader, dimmer highlight (see _area_spec_spread).
+        spec_spread = self._area_spec_spread()
+        spec_spread_inv = 1.0 / spec_spread
+        spec_gain *= spec_spread_inv * spec_spread_inv
+        acos = math.acos
+        cos = math.cos
         tonal_lut = self._tonal_lut()
         tonal_last = len(tonal_lut) - 1
         ambient_base = self.ambient * self.AMBIENT_SCALE
@@ -1354,6 +1510,9 @@ class ColorEngine:
 
                 hx, hy, hz = self._light_half[row][col]
                 ndh = max(0.0, nx * hx + ny * hy + nz * hz)
+                if spec_spread != 1.0:
+                    # The whole lobe, knee included, stretched in angle.
+                    ndh = cos(acos(ndh if ndh < 1.0 else 1.0) * spec_spread_inv)
                 knee_curve = self._smoothstep(spec_knee, 1.0, ndh)
                 spec_pos = max(0.0, min(1.0, ndh)) * spec_last
                 i0 = int(spec_pos)
@@ -1414,7 +1573,605 @@ class ColorEngine:
     # ------------------------------------------------------------------
     # Rendering
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Rendering (issue #56: the fast pipeline)
+    # ------------------------------------------------------------------
+    # render() and render_bgra() run the pipeline on flat per-channel lists,
+    # only over the pixels inside the sphere, with the per-pixel terms that
+    # depend on geometry and light cached with the light. A colour change (a
+    # Hue / Sat / Value drag, the commonest edit) then reruns one short loop.
+    # Every expression keeps the reference order, so the output is
+    # bit-identical to render_reference(), the original implementation, kept
+    # for the diagnostics and for the test that holds the two together.
+
     def render(self, base_color: Sequence[float], width: int, height: int) -> List[List[Pixel]]:
+        """Render to rows of (r, g, b) ints (outside the sphere: (0, 0, 0))."""
+        width = max(2, int(width))
+        height = max(2, int(height))
+        if not self._fast_ok():
+            return self.render_reference(base_color, width, height)
+        red, green, blue = self._fast_render(base_color, width, height)[:3]
+        return [list(zip(red[r * width:(r + 1) * width], green[r * width:(r + 1) * width],
+                         blue[r * width:(r + 1) * width])) for r in range(height)]
+
+    def render_bgra(self, base_color: Sequence[float], width: int, height: int) -> bytearray:
+        """Render straight to premultiplied-free BGRA bytes with the analytic
+        circle coverage in alpha; antialiased edge pixels take the colour of
+        their nearest interior pixel (as the processor's packer did)."""
+        width = max(2, int(width))
+        height = max(2, int(height))
+        if not self._fast_ok():
+            return None
+        red, green, blue, geo = self._fast_render(base_color, width, height)
+        for dst, src in geo["edge_src"]:
+            red[dst] = red[src]
+            green[dst] = green[src]
+            blue[dst] = blue[src]
+        raw = bytearray(width * height * 4)
+        raw[0::4] = bytes(blue)
+        raw[1::4] = bytes(green)
+        raw[2::4] = bytes(red)
+        raw[3::4] = geo["alpha"]
+        return raw
+
+    def _fast_ok(self) -> bool:
+        """The fast path covers the stock material stage only; an engine that
+        overrides it (the diagnostics) renders through render_reference()."""
+        cls = type(self)
+        return (cls._build_material_stage is ColorEngine._build_material_stage
+                and cls.render is ColorEngine.render)
+
+    def _fast_geometry(self, width: int, height: int) -> dict:
+        """Per-size tables: the sphere's row spans, flat normals, alpha bytes,
+        each edge pixel's nearest interior pixel, blur normalisers. Built
+        from the same grids as the reference, once per size."""
+        cache = self.__dict__.setdefault("_fast_geo_cache", {})
+        geo = cache.get((width, height))
+        if geo is not None:
+            return geo
+        mask, cov = self._mask_grid, self._coverage_grid
+        spans = []
+        for row in range(height):
+            mrow = mask[row]
+            cols = [c for c in range(width) if mrow[c]]
+            if cols:
+                # The circle's interior is one run per row.
+                assert cols[-1] - cols[0] + 1 == len(cols)
+                spans.append((row, cols[0], cols[-1] + 1))
+        n = width * height
+        flat_mask = [0.0] * n
+        for row, c0, c1 in spans:
+            base = row * width
+            for c in range(c0, c1):
+                flat_mask[base + c] = 1.0
+        alpha = bytearray(n)
+        edge_src = []
+        for row in range(height):
+            mrow, crow = mask[row], cov[row]
+            for col in range(width):
+                a = crow[col]
+                if mrow[col] or a > 0.0:
+                    alpha[row * width + col] = int(max(0.0, min(1.0, a)) * 255.0 + 0.5)
+                if not mrow[col] and a > 0.0:
+                    src = self._nearest_inside(mask, row, col, width, height)
+                    if src is not None:
+                        edge_src.append((row * width + col, src[0] * width + src[1]))
+        geo = {"spans": spans, "mask": flat_mask, "alpha": bytes(alpha),
+               "edge_src": edge_src, "blur": {}}
+        cache[(width, height)] = geo
+        while len(cache) > 6:
+            cache.pop(next(iter(cache)))
+        return geo
+
+    @staticmethod
+    def _nearest_inside(mask, row, col, width, height):
+        """The processor's nearest-shade search, returning the position."""
+        for radius in range(1, max(width, height)):
+            for dr in range(-radius, radius + 1):
+                dcs = range(-radius, radius + 1) if abs(dr) == radius else (-radius, radius)
+                for dc in dcs:
+                    r, c = row + dr, col + dc
+                    if 0 <= r < height and 0 <= c < width and mask[r][c]:
+                        return r, c
+        return None
+
+    def _fast_lighting(self, width: int, height: int, geo: dict) -> dict:
+        """Per-pixel terms that depend on geometry, the light and the
+        material's non-colour settings, not on the colours. Cached by key."""
+        key = (self._light_cache_key_value, self.spec_max, self.shininess, self.spec_knee,
+               self.mixer_mode, self.ambient, self.SPEC_GAIN, self.AREA_SIZE,
+               self.DIFFUSE_FLOOR, self.DIFFUSE_GAIN, self.DIFFUSE_LEVEL, self.FLOOR_SOFTNESS,
+               self.AMBIENT_SCALE, self.AMBIENT_SKY_MIX, self.REFLECT_STRENGTH,
+               self.REFLECT_POWER, self.REFLECT_SPREAD, self.REFLECT_START, self.REFLECT_END,
+               self.SHADOW_HUE_MAX, self.SHADOW_HUE_LUT_SIZE, self.SPEC_LUT_SIZE,
+               self.TONAL_BASE, self.TONAL_LIGHT_POWER, self.TONAL_SHADOW_START,
+               self.TONAL_SHADOW_MIX, self.TONAL_LIGHT_MAX, width, height)
+        lit = self.__dict__.get("_fast_light")
+        if lit is not None and lit["key"] == key:
+            return lit
+        if getattr(self, "_spec_lut_value", None) != float(self.shininess):
+            self._build_spec_lut()
+        spec_lut = self._spec_lut
+        spec_last = len(spec_lut) - 1
+        spec_knee = max(self.SPEC_KNEE_MIN, min(self.SPEC_KNEE_MAX, self.spec_knee))
+        spec_max = self.spec_max
+        spec_gain = self.SPEC_GAIN
+        spec_spread = self._area_spec_spread()
+        spec_spread_inv = 1.0 / spec_spread
+        spec_gain *= spec_spread_inv * spec_spread_inv
+        acos, cos = math.acos, math.cos
+        tonal_lut = self._tonal_lut()
+        tonal_last = len(tonal_lut) - 1
+        ambient_base = self.ambient * self.AMBIENT_SCALE
+        ambient_k = self.ambient * 0.35
+        ambient_sky_mix = self.AMBIENT_SKY_MIX
+        diffuse_floor = self.DIFFUSE_FLOOR
+        diffuse_gain = self.DIFFUSE_GAIN
+        diffuse_level = self.DIFFUSE_LEVEL
+        if diffuse_level <= 0.0:
+            diffuse_level = 2.0 * diffuse_gain / (1.0 + diffuse_gain)
+        diffuse_k = diffuse_level * (1.0 + diffuse_gain)
+        floor_soft = self.FLOOR_SOFTNESS
+        hue_on = self.SHADOW_HUE_MAX > 0.0
+        hue_last = self.SHADOW_HUE_LUT_SIZE - 1
+        reflect_k = self.REFLECT_STRENGTH
+        reflect_p = self.REFLECT_POWER
+        reflect_s = self.REFLECT_SPREAD
+        reflect_a = self.REFLECT_START
+        reflect_span = self.REFLECT_END - reflect_a
+        mixer = self.mixer_mode
+        hypot = math.hypot
+        n = width * height
+        # Flat, full-size, so the colour pass indexes them like its output.
+        stb_l = [0.0] * n; btl_l = [0.0] * n; hue_l = [0] * n; bf_l = [0.0] * n
+        mix_l = [0.0] * n; sk_l = [0.0] * n; rk_l = [0.0] * n; yn_l = [0.0] * n
+        yp_l = [0.0] * n; spec_l = [0.0] * n; mx_l = [0.0] * n; ndl_l = [0.0] * n
+        nv_l = [0.0] * n; ill_l = [0.0] * n; sf_l = [0.0] * n
+        nxy_l = geo.get("nxy")
+        if nxy_l is None:
+            nxy_l = [0.0] * n
+            for row, c0, c1 in geo["spans"]:
+                nrm_row = self._normal_grid[row]
+                for col in range(c0, c1):
+                    nxy_l[row * width + col] = hypot(nrm_row[col][0], nrm_row[col][1])
+            geo["nxy"] = nxy_l
+        last_ldir = None
+        lxy = 0.0
+        for row, c0, c1 in geo["spans"]:
+            self._check_cancel()
+            nrm_row = self._normal_grid[row]
+            lrow = self._light_ldir[row]
+            erow = self._light_illum[row]
+            drow = self._light_ndl[row]
+            hrow = self._light_half[row]
+            base = row * width
+            for col in range(c0, c1):
+                i = base + col
+                nx, ny, nz = nrm_row[col]
+                ldir = lrow[col]
+                illuminance = erow[col]
+                ndl = drow[col]
+                ndlc = ndl if ndl < 1.0 else 1.0
+                if ndlc < 0.0:
+                    ndlc = 0.0
+                stb_l[i], btl_l[i] = tonal_lut[int(ndlc * tonal_last + 0.5)]
+                if hue_on:
+                    sn = nx * ldir[0] + ny * ldir[1] + nz * ldir[2]
+                    hue_l[i] = int((sn + 1.0) * 0.5 * hue_last + 0.5)
+                de = illuminance * ndl
+                gde = diffuse_gain * de
+                direct_factor = diffuse_k * de / (1.0 + gde) if de > 0.0 else 0.0
+                st = ndl / 0.55
+                if st < 0.0:
+                    st = 0.0
+                elif st > 1.0:
+                    st = 1.0
+                shadow_factor = 1.0 - st * st * (3.0 - 2.0 * st)
+                sf_l[i] = shadow_factor
+                ambient_factor = ambient_base + shadow_factor * ambient_k
+                if floor_soft > 0.0:
+                    gap = direct_factor - diffuse_floor
+                    h = floor_soft - (gap if gap > 0.0 else -gap)
+                    body_factor = direct_factor if gap > 0.0 else diffuse_floor
+                    if h > 0.0:
+                        body_factor += h * h * 0.25 / floor_soft
+                else:
+                    body_factor = direct_factor
+                    if body_factor < diffuse_floor:
+                        body_factor = diffuse_floor
+                bf_l[i] = body_factor
+                mix_l[i] = ambient_factor * ambient_sky_mix
+                sk_l[i] = ambient_factor * 0.05
+                # Lit side (shadow_factor 0): the reflected term is exactly 0.
+                if reflect_k > 0.0 and shadow_factor != 0.0:
+                    edge = 1.0 - (nz if nz > 0.0 else 0.0)
+                    if reflect_span > 0.0:
+                        rt = (edge - reflect_a) / reflect_span
+                        rt = 0.0 if rt < 0.0 else (1.0 if rt > 1.0 else rt)
+                        rk = reflect_k * shadow_factor * rt * rt * (3.0 - 2.0 * rt)
+                    else:
+                        rk = reflect_k * shadow_factor * edge ** reflect_p
+                    if reflect_s > 0.0:
+                        if ldir is not last_ldir:
+                            last_ldir = ldir
+                            lxy = hypot(ldir[0], ldir[1])
+                        nxy = nxy_l[i]
+                        if lxy > 1e-6 and nxy > 1e-6:
+                            away = -(nx * ldir[0] + ny * ldir[1]) / (lxy * nxy)
+                            rk *= (away if away > 0.0 else 0.0) ** reflect_s
+                    rk_l[i] = rk
+                yn = -ny
+                yn_l[i] = yn if yn > 0.0 else 0.0
+                yp_l[i] = ny if ny > 0.0 else 0.0
+                # Unlit (N.L 0) or below the knee: the specular is exactly 0.
+                if ndl != 0.0 and illuminance != 0.0:
+                    hx, hy, hz = hrow[col]
+                    ndh = nx * hx + ny * hy + nz * hz
+                    ndh = ndh if ndh > 0.0 else 0.0
+                    if spec_spread != 1.0:
+                        ndh = cos(acos(ndh if ndh < 1.0 else 1.0) * spec_spread_inv)
+                    if spec_knee == 1.0:
+                        knee_curve = 1.0 if ndh >= 1.0 else 0.0
+                    else:
+                        kt = (ndh - spec_knee) / (1.0 - spec_knee)
+                        kt = 0.0 if kt < 0.0 else (1.0 if kt > 1.0 else kt)
+                        knee_curve = kt * kt * (3.0 - 2.0 * kt)
+                    if knee_curve != 0.0:
+                        spec_pos = (0.0 if ndh < 0.0 else (1.0 if ndh > 1.0 else ndh)) * spec_last
+                        i0 = int(spec_pos)
+                        i1 = spec_last if i0 >= spec_last else i0 + 1
+                        spec_pow = spec_lut[i0] + (spec_lut[i1] - spec_lut[i0]) * (spec_pos - i0)
+                        spec_term = illuminance * ndl * spec_pow * knee_curve
+                        spec_term *= spec_max * spec_gain
+                        spec_l[i] = 0.0 if spec_term < 0.0 else (4.0 if spec_term > 4.0 else spec_term)
+                if mixer == "Additive":
+                    mx_l[i] = ndl * 0.06
+                elif mixer == "Multiplicative":
+                    mx_l[i] = 0.78 + 0.22 * ndl
+                ndl_l[i] = ndl
+                nv_l[i] = nz if nz > 0.0 else 0.0
+                ill_l[i] = illuminance
+        lit = {"key": key, "stb": stb_l, "btl": btl_l, "hue": hue_l, "bf": bf_l,
+               "mix": mix_l, "sk": sk_l, "rk": rk_l, "yn": yn_l, "yp": yp_l,
+               "spec": spec_l, "mx": mx_l, "ndl": ndl_l, "nv": nv_l, "ill": ill_l,
+               "sf": sf_l, "accent": {}}
+        self._fast_light = lit
+        return lit
+
+    def _fast_accents(self, lit: dict, geo: dict) -> tuple:
+        """Rim and glow weights per pixel (geometry x light x their settings)."""
+        glow_power = max(1.0, self.glow_radius / 4.0)
+        key = (self.rim_light, self.glow_intensity, glow_power)
+        acc = lit["accent"].get(key)
+        if acc is not None:
+            return acc
+        rim_k = self.rim_light
+        glow_on = self.glow_intensity > 0.0
+        glow_intensity = self.glow_intensity
+        n = len(lit["ndl"])
+        rim_l = [0.0] * n
+        glow_l = [0.0] * n if glow_on else None
+        ndl_l, nv_l, ill_l = lit["ndl"], lit["nv"], lit["ill"]
+        for row, c0, c1 in geo["spans"]:
+            for i in range(row * self._fast_width + c0, row * self._fast_width + c1):
+                ndl = ndl_l[i]
+                nv = nv_l[i]
+                r = 1.0 - nv
+                r2 = r * r
+                rim = r2 * r2 * r * ndl * rim_k
+                e = ill_l[i]
+                rim *= 0.5 + 0.5 * (e if e < 2.0 else 2.0)
+                rim_l[i] = rim
+                if glow_on:
+                    glow_l[i] = ((1.0 - nv) ** glow_power) * ndl * glow_intensity
+        acc = (rim_l, glow_l)
+        lit["accent"] = {key: acc}
+        return acc
+
+    def _fast_render(self, base_color, width: int, height: int):
+        """The pipeline up to 8-bit channels: flat red, green, blue lists
+        (0 outside the sphere), plus the per-size tables."""
+        t_total = time.perf_counter()
+        if self._grid_width != width or self._grid_height != height:
+            if not self._restore_geometry(width, height):
+                t_geo = time.perf_counter()
+                self._generate_geometry(width, height)
+                self._compute_shading()
+                self._record_timing("geometry", (time.perf_counter() - t_geo) * 1000.0)
+            else:
+                self._compute_shading()
+        self._fast_width = width
+        base_srgb = self._coerce_color(base_color)
+        base_linear = self._to_linear(base_srgb)
+        shadow_linear = self._to_linear(self.shadow_color)
+        light_linear = self._to_linear(self.light_color)
+        ambient_linear = self._to_linear(self.ambient_color)
+        highlight_linear = self._to_linear(self._effective_highlight(base_srgb))
+        sky_linear = self._to_linear(self.AMBIENT_SKY)
+        ground_linear = self._to_linear(self.GROUND_COLOR)
+
+        t_light = time.perf_counter()
+        self._build_light_stage(width, height)
+        self._record_timing("light", (time.perf_counter() - t_light) * 1000.0)
+        geo = self._fast_geometry(width, height)
+
+        t_mat = time.perf_counter()
+        lit = self._fast_lighting(width, height, geo)
+        rim_l, glow_l = self._fast_accents(lit, geo)
+        n = width * height
+        out_r = [0.0] * n
+        out_g = [0.0] * n
+        out_b = [0.0] * n
+        s0, s1, s2 = shadow_linear
+        b0_, b1_, b2_ = base_linear
+        l0, l1, l2 = light_linear
+        hl0, hl1, hl2 = highlight_linear
+        sky0, sky1, sky2 = sky_linear
+        gr0, gr1, gr2 = ground_linear
+        atr = shadow_linear[0] + (ambient_linear[0] - shadow_linear[0]) * 0.35
+        atg = shadow_linear[1] + (ambient_linear[1] - shadow_linear[1]) * 0.35
+        atb = shadow_linear[2] + (ambient_linear[2] - shadow_linear[2]) * 0.35
+        env_k = self.ENV_ALBEDO
+        env_on = env_k > 0.0
+        reflect_on = self.REFLECT_STRENGTH > 0.0
+        sky_b = self.sky_bounce
+        ground_b = self.ground_bounce
+        hue_lut = (self._shadow_hue_lut(shadow_linear, base_linear)
+                   if self.SHADOW_HUE_MAX > 0.0 else None)
+        mixer = self.mixer_mode
+        additive = mixer == "Additive"
+        multiplicative = mixer == "Multiplicative"
+        contrast_lut = self._contrast_lut
+        clut_last = len(contrast_lut) - 1
+        saturation = self.saturation
+        brightness = self.brightness
+        grain_on = self.grain > 0.0
+        grain_amount = self.grain / 100.0
+        grain_boost = 1.0 + self.DARK_GRAIN_BOOST
+        grain_depth = self.GRAIN_DEPTH
+        noise = self._noise
+        rim_color = self._lerp(light_linear, sky_linear, self.rim_sky_mix)
+        rc0, rc1, rc2 = rim_color
+        glow_on = glow_l is not None
+        glow_gain = self.GLOW_GAIN
+        shoulder = self.TONE_SHOULDER
+        span = 1.0 - shoulder
+        inv_span = 1.0 / span
+        exp = math.exp
+        stb_l, btl_l, hue_l, bf_l = lit["stb"], lit["btl"], lit["hue"], lit["bf"]
+        mix_l, sk_l, rk_l, yn_l, yp_l = lit["mix"], lit["sk"], lit["rk"], lit["yn"], lit["yp"]
+        spec_l, mx_l, ndl_l, sf_l = lit["spec"], lit["mx"], lit["ndl"], lit["sf"]
+        for row, c0, c1 in geo["spans"]:
+            self._check_cancel()
+            base = row * width
+            for i in range(base + c0, base + c1):
+                # --- material (colours) ---
+                stb = stb_l[i]
+                btl = btl_l[i]
+                if hue_lut is not None:
+                    t0r, t0g, t0b = hue_lut[hue_l[i]]
+                else:
+                    t0r = s0 + (b0_ - s0) * stb
+                    t0g = s1 + (b1_ - s1) * stb
+                    t0b = s2 + (b2_ - s2) * stb
+                tcr = t0r + (l0 - t0r) * btl
+                tcg = t0g + (l1 - t0g) * btl
+                tcb = t0b + (l2 - t0b) * btl
+                bf = bf_l[i]
+                mix = mix_l[i]
+                br = tcr * bf + atr * mix
+                bg = tcg * bf + atg * mix
+                bb = tcb * bf + atb * mix
+                sk = sk_l[i]
+                if env_on:
+                    er = 1.0 - env_k + env_k * tcr
+                    eg = 1.0 - env_k + env_k * tcg
+                    eb = 1.0 - env_k + env_k * tcb
+                else:
+                    er = eg = eb = 1.0
+                br += sky0 * sk * er
+                bg += sky1 * sk * eg
+                bb += sky2 * sk * eb
+                if reflect_on:
+                    rk = rk_l[i]
+                    br += b0_ * rk
+                    bg += b1_ * rk
+                    bb += b2_ * rk
+                yn = yn_l[i]
+                yp = yp_l[i]
+                br += sky0 * yn * sky_b * er
+                bg += sky1 * yn * sky_b * eg
+                bb += sky2 * yn * sky_b * eb
+                br += gr0 * yp * ground_b * er
+                bg += gr1 * yp * ground_b * eg
+                bb += gr2 * yp * ground_b * eb
+                st = spec_l[i]
+                br = br + hl0 * st
+                bg = bg + hl1 * st
+                bb = bb + hl2 * st
+                if additive:
+                    m = mx_l[i]
+                    br = br + 1.0 * m
+                    bg = bg + 1.0 * m
+                    bb = bb + 1.0 * m
+                elif multiplicative:
+                    m = mx_l[i]
+                    br = br * m
+                    bg = bg * m
+                    bb = bb * m
+                # --- display ---
+                luma = 0.2126 * br + 0.7152 * bg + 0.0722 * bb
+                if luma > 1.0e-8:
+                    cl = luma if luma < 1.0 else 1.0
+                    if cl < 0.0:
+                        cl = 0.0
+                    f = contrast_lut[int(cl * clut_last + 0.5)] / luma
+                    br = br * f
+                    bg = bg * f
+                    bb = bb * f
+                else:
+                    br = bg = bb = 0.0
+                luma = 0.2126 * br + 0.7152 * bg + 0.0722 * bb
+                br = luma + (br - luma) * saturation
+                bg = luma + (bg - luma) * saturation
+                bb = luma + (bb - luma) * saturation
+                if brightness != 1.0:
+                    br = br * brightness
+                    bg = bg * brightness
+                    bb = bb * brightness
+                if grain_on:
+                    amount = grain_amount
+                    if sf_l[i] > 0.5:
+                        amount *= grain_boost
+                    nz_ = noise(row, i - base)
+                    scale = grain_depth * amount
+                    br = max(0.0, br + nz_ * scale)
+                    bg = max(0.0, bg + nz_ * scale)
+                    bb = max(0.0, bb + nz_ * scale)
+                rim = rim_l[i]
+                if rim != 0.0:
+                    br = br + rc0 * rim
+                    bg = bg + rc1 * rim
+                    bb = bb + rc2 * rim
+                if glow_on:
+                    glow = glow_l[i]
+                    if glow != 0.0:
+                        gk = glow * glow_gain
+                        br = br + hl0 * gk
+                        bg = bg + hl1 * gk
+                        bb = bb + hl2 * gk
+                out_r[i] = (br if br <= shoulder else shoulder + span * (1.0 - exp(-(br - shoulder) * inv_span))) if br > 0.0 else 0.0
+                out_g[i] = (bg if bg <= shoulder else shoulder + span * (1.0 - exp(-(bg - shoulder) * inv_span))) if bg > 0.0 else 0.0
+                out_b[i] = (bb if bb <= shoulder else shoulder + span * (1.0 - exp(-(bb - shoulder) * inv_span))) if bb > 0.0 else 0.0
+        self._record_timing("material", (time.perf_counter() - t_mat) * 1000.0)
+
+        if self.smooth > 0.0:
+            t_smooth = time.perf_counter()
+            radius = max(0, min(2, int(int(round(self.smooth)))))
+            if radius > 0:
+                out_r, out_g, out_b = self._fast_blur(out_r, out_g, out_b, radius, width, height, geo)
+            self._record_timing("smooth", (time.perf_counter() - t_smooth) * 1000.0)
+
+        t_srgb = time.perf_counter()
+        lut8 = self._srgb_lut8()
+        last = len(lut8) - 1
+        mask = geo["mask"]
+        red = [lut8[int((0.0 if v < 0.0 else (1.0 if v > 1.0 else v)) * last + 0.5)] if m else 0
+               for v, m in zip(out_r, mask)]
+        green = [lut8[int((0.0 if v < 0.0 else (1.0 if v > 1.0 else v)) * last + 0.5)] if m else 0
+                 for v, m in zip(out_g, mask)]
+        blue = [lut8[int((0.0 if v < 0.0 else (1.0 if v > 1.0 else v)) * last + 0.5)] if m else 0
+                for v, m in zip(out_b, mask)]
+        self._record_timing("srgb", (time.perf_counter() - t_srgb) * 1000.0)
+        total_ms = (time.perf_counter() - t_total) * 1000.0
+        self._record_timing("total", total_ms)
+        self._log_timings(width, height, total_ms)
+        return red, green, blue, geo
+
+    @classmethod
+    def _srgb_lut8(cls) -> List[int]:
+        """The sRGB table already rounded to 8 bits, exactly as the reference
+        rounds each lookup."""
+        lut = cls.__dict__.get("_SRGB_LUT8")
+        if lut is None:
+            lut = [int(v * 255.0 + 0.5) for v in cls._srgb_lut()]
+            cls._SRGB_LUT8 = lut
+        return lut
+
+    def _fast_blur(self, rr, gg, bb, radius, width, height, geo):
+        """The masked separable blur of _soften_linear on flat channels:
+        same kernel, same edge replication, same summation order, so the
+        result is bit-identical. Each tap is a shifted slice; the per-pixel
+        normalisers depend only on the mask and are cached per size."""
+        if radius == 1:
+            kernel = (1.0 / 4.0, 2.0 / 4.0, 1.0 / 4.0)
+        else:
+            sixth = 1.0 / 16.0
+            kernel = (sixth, 4.0 * sixth, 6.0 * sixth, 4.0 * sixth, sixth)
+        k = len(kernel)
+        off = k // 2
+        mask = geo["mask"]
+        w, h = width, height
+        n = w * h
+        inv = geo["blur"].get(radius)
+        if inv is None:
+            inv_h = self._blur_pass(mask, kernel, w, h, horizontal=True)
+            inv_v = self._blur_pass(mask, kernel, w, h, horizontal=False)
+            inv = ([1.0 / a if m else 0.0 for a, m in zip(inv_h, mask)],
+                   [1.0 / a if m else 0.0 for a, m in zip(inv_v, mask)])
+            geo["blur"][radius] = inv
+        inv_h, inv_v = inv
+        border_free = geo.get("border_free")
+        if border_free is None:
+            border_free = not any(mask[i] for i in range(w)) and \
+                not any(mask[i] for i in range(n - w, n)) and \
+                not any(mask[r * w] or mask[r * w + w - 1] for r in range(h))
+            geo["border_free"] = border_free
+        out = []
+        for ch in (rr, gg, bb):
+            if border_free:
+                # Nothing on the border is inside the sphere, so every
+                # replicated edge tap is a 0 and plain shifts are exact.
+                hv = self._blur_flat(ch, kernel, 1, n, inv_h)
+                out.append(self._blur_flat(hv, kernel, w, n, inv_v))
+            else:
+                hsum = self._blur_pass(ch, kernel, w, h, horizontal=True)
+                hv = [a * b for a, b in zip(hsum, inv_h)]
+                vsum = self._blur_pass(hv, kernel, w, h, horizontal=False)
+                out.append([a * b for a, b in zip(vsum, inv_v)])
+        return out[0], out[1], out[2]
+
+    @staticmethod
+    def _blur_flat(vals, kernel, stride, n, inv):
+        """sum(v[i + (k - off) * stride] * kernel[k]) * inv[i] with zero
+        padding, in the reference's tap order."""
+        k = len(kernel)
+        off = k // 2
+        pad = [0.0] * (off * stride)
+        padded = pad + vals + pad
+        taps = [padded[j * stride:j * stride + n] for j in range(k)]
+        if k == 5:
+            w0, w1, w2, w3, w4 = kernel
+            return [(0.0 + a * w0 + b * w1 + c * w2 + d * w3 + e * w4) * iv
+                    for a, b, c, d, e, iv in zip(*taps, inv)]
+        w0, w1, w2 = kernel
+        return [(0.0 + a * w0 + b * w1 + c * w2) * iv for a, b, c, iv in zip(*taps, inv)]
+
+    @staticmethod
+    def _blur_pass(vals, kernel, w, h, horizontal):
+        """One pass of sum(v[k] * kernel[k]) over the taps, edge-replicated,
+        accumulated in tap order from 0.0 (as the reference does)."""
+        k = len(kernel)
+        off = k // 2
+        if horizontal:
+            out = []
+            ext = out.extend
+            for r in range(h):
+                row = vals[r * w:(r + 1) * w]
+                padded = [row[0]] * off + row + [row[-1]] * off
+                taps = [padded[j:j + w] for j in range(k)]
+                if k == 5:
+                    w0, w1, w2, w3, w4 = kernel
+                    ext([0.0 + a * w0 + b * w1 + c * w2 + d * w3 + e * w4
+                         for a, b, c, d, e in zip(*taps)])
+                else:
+                    w0, w1, w2 = kernel
+                    ext([0.0 + a * w0 + b * w1 + c * w2 for a, b, c in zip(*taps)])
+            return out
+        first, lastrow = vals[0:w], vals[(h - 1) * w:h * w]
+        padded = first * off + vals + lastrow * off
+        n = w * h
+        taps = [padded[j * w:j * w + n] for j in range(k)]
+        if k == 5:
+            w0, w1, w2, w3, w4 = kernel
+            return [0.0 + a * w0 + b * w1 + c * w2 + d * w3 + e * w4
+                    for a, b, c, d, e in zip(*taps)]
+        w0, w1, w2 = kernel
+        return [0.0 + a * w0 + b * w1 + c * w2 for a, b, c in zip(*taps)]
+
+    def render_reference(self, base_color: Sequence[float], width: int, height: int) -> List[List[Pixel]]:
+        """The original pipeline, unchanged: the reference the fast one is
+        held to, and the path for engines that override the material stage."""
         width = max(2, int(width))
         height = max(2, int(height))
         t_total = time.perf_counter()

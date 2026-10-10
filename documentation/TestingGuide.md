@@ -3,13 +3,39 @@
 This document outlines the complete testing strategy for the Lumina Krita plugin.
 
 ## Table of Contents
-1. [Standalone Tests](#standalone-tests)
+1. [The current suite](#the-current-suite)
+2. [Standalone Tests](#standalone-tests)
 2. [Krita Integration Tests](#krita-integration-tests)
 3. [Test Automation](#test-automation)
 4. [Debugging Checklist](#debugging-checklist)
 5. [Version Compatibility](#version-compatibility)
 
 ---
+
+## The current suite
+
+Run everything from the repository root:
+
+```bash
+QT_QPA_PLATFORM=offscreen python3 -m pytest -q src/Lumina      # 317 tests, ~25 s
+python3 src/Lumina/test_shading_standalone.py                  # engine-only smoke test
+```
+
+| File | What it holds |
+|---|---|
+| `test_release_calibration.py` | Shading contract, stdlib only:<br>• tonal roles, contrast, the #45 shade and rim fit<br>• the four lamp models (#53) and form zones<br>• the fast pipeline: bit-identical to `render_reference()` at an even and an odd size (`test_fast_pipeline_is_bit_identical_to_the_reference`), and at least 2× faster on a colour change on the same machine (#56) |
+| `test_ui_defaults.py` | The panel, headless:<br>• layout (a centred sphere, aligned sliders, the Shade / Base / Light row, the readout under the sphere)<br>• presets, undo / redo, background renders and cancellation, wheel bursts<br>• settings round-trips and the v6 migration (#57), including a real 2.6.0-style file, a 2.7.0 file that must not migrate, and a whole old preset<br>• the canvas watch searching the central area only |
+| `test_full_cache.py` | The full-quality output cache: keys, hits and misses. |
+| `test_diagnostic_*.py` | The diagnostic engines, which run through `render_reference()`. |
+
+Tools that regenerate artefacts:
+
+- `tools/render_docs_images.py`: the docs screenshots, `Lumina_lamps.png`, `lumina_demo.gif` and `lumina_zones.gif`.
+- `tools/render_perf_chart.py`: measures the old and new pipelines and draws `images/render_speed.png`.
+- `tools/render_short.py`: the headless Short. `--docs-gif` also cuts `images/lumina_paint_zones.gif`.
+- `tools/krita_short/`: the Krita-painted Short behind the README's feature video (`images/lumina_short.gif`). It runs inside Krita through KritaPilot; see its README.
+
+For engine changes that must not alter output, capture renders before the change and compare bytes after. That is how #56 was held bit-identical across 72 renders: all four lamps, the mixer modes, glow, grain, the blur settings, and 200 / 288 px.
 
 ## Standalone Tests
 

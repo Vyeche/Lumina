@@ -28,7 +28,7 @@ From the repository root:
 
 ```bash
 DEPLOY="$HOME/.var/app/org.kde.krita/data/krita/pykrita"
-rsync -a --delete --exclude='__pycache__' --exclude='lumina_log.txt' src/Lumina/ "$DEPLOY/Lumina/"
+rsync -a --delete --exclude='__pycache__' --exclude='.pytest_cache' --exclude='lumina_log.txt' src/Lumina/ "$DEPLOY/Lumina/"
 cp src/Lumina.desktop "$DEPLOY/"
 ```
 
@@ -38,6 +38,7 @@ Three details that matter:
 |---|---|
 | `--delete` | Removes files deleted from source instead of leaving stale modules in the deploy dir. |
 | `--exclude='__pycache__'` | Without it, host Python (3.12) bytecode is copied into the deploy dir next to Krita's own (3.13). Harmless but confusing; it also means the file you inspect may not be the one Krita runs. |
+| `--exclude='.pytest_cache'` | Running the tests leaves a pytest cache inside `src/Lumina/`; it is not part of the plugin. |
 | `--exclude='lumina_log.txt'` | Running the tests writes their own `src/Lumina/lumina_log.txt`. Without the exclude, every deploy copies it over Krita's log and the record of what happened in Krita is lost. |
 | `.desktop` at root | The plugin will not register if it sits inside the package dir. |
 

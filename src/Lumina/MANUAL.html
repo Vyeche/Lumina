@@ -63,7 +63,7 @@ while you are editing.</p>
 <p>Under each block sits its <strong>hex value</strong>. Click a hex value to copy it to the
 clipboard. The current box shows the <strong>selected target</strong> (shadow, base or
 highlight), and the toggle beside it names it — <strong>EDIT SHADE</strong>, <strong>EDIT BASE</strong> or
-<strong>EDIT HIGH</strong>. It unlocks typing (green <strong>DONE</strong> while open): type a hex color and
+<strong>EDIT LIGHT</strong>. It unlocks typing (green <strong>DONE</strong> while open): type a hex color and
 press Enter. For the base, the light and shadow are derived from it, like
 eyedropping; a shadow or highlight takes the color exactly as typed.
 The previous box is display plus copy only. The
@@ -72,7 +72,7 @@ lock state is saved with your settings.</p>
 <p><strong>A target changes</strong> (and with it the sphere) in three ways:</p>
 <ul>
 <li><strong>Typing a hex</strong> into the box under the active swatch: it edits the selected
-  target — the toggle reads <strong>EDIT SHADE</strong>, <strong>EDIT BASE</strong> or <strong>EDIT HIGH</strong>.</li>
+  target — the toggle reads <strong>EDIT SHADE</strong>, <strong>EDIT BASE</strong> or <strong>EDIT LIGHT</strong>.</li>
 <li><strong>Krita's colour</strong> — an eyedropper pick or any change in Krita's colour
   selectors replaces the selected target, like a switch.</li>
 <li><strong>The Hue and Saturation sliders</strong> edit the selected target (Light edits the
@@ -96,7 +96,7 @@ never its three colours.</p>
 to 340 px. <strong>The color sampler</strong> is a lemon that rests on the sphere under your
 pointer (the pointer itself hides while it is there). It lies along the curve,
 is filled with the exact color being read, and shows that color's hex in a pill
-beneath it; under the target dots it reads as <strong>H / S / L</strong> in the sliders' own units. A click makes it pop;
+beneath it; just under the sphere it reads as <strong>H / S / V</strong> in the sliders' own units, followed by the <strong>form zone</strong> under the pointer: <em>Highlight</em>, <em>Light</em>, <em>Halftone</em>, <em>Terminator</em>, <em>Core shadow</em> or <em>Reflected light</em>. The zones follow the lamp, so switching Point / Sun / Spot / Area shows where each band moves. A click makes it pop;
 while you hold the button it stays a little larger, and if you hold on long
 enough it starts to sweat (a faint ring fills round it while you wait).</p>
 <ul>
@@ -132,12 +132,12 @@ enough it starts to sweat (a faint ring fills round it while you wait).</p>
 </tr>
 <tr>
 <td><strong>Panel</strong></td>
-<td><strong>Area</strong> — broad panel; soft wrap.</td>
+<td><strong>Area</strong> — a broad panel: as bright as Point, with a soft, wide edge into the shadow and a broader, softer highlight.</td>
 </tr>
 </tbody>
 </table>
 <h3>Target dots</h3>
-<p>Below the sphere, three small icons pick which color the Hue and Saturation sliders edit. They share one visual language — a dark-to-bright progression on the same circle:</p>
+<p>Below the sphere, three color dots pick which color the Hue, Saturation and Value sliders edit. Each dot shows the color it holds, captioned with its name:</p>
 <table>
 <thead>
 <tr>
@@ -147,20 +147,20 @@ enough it starts to sweat (a faint ring fills round it while you wait).</p>
 </thead>
 <tbody>
 <tr>
-<td><strong>Half-dark circle</strong></td>
-<td><strong>Shadow</strong> — the hue of the darkest areas.</td>
+<td><strong>Shade</strong></td>
+<td>The hue of the darkest areas.</td>
 </tr>
 <tr>
-<td><strong>Plain ring</strong></td>
-<td><strong>Base</strong> — the color of the object.</td>
+<td><strong>Base</strong></td>
+<td>The color of the object.</td>
 </tr>
 <tr>
-<td><strong>Ring with rays</strong></td>
-<td><strong>Light</strong> — the highlight color; also drives how bright the lit side gets.</td>
+<td><strong>Light</strong></td>
+<td>The highlight color; also drives how bright the lit side gets.</td>
 </tr>
 </tbody>
 </table>
-<p>Each pair is captioned <strong>Shade</strong>, <strong>Base</strong> or <strong>High</strong>. The selected target shows on its <strong>color swatch</strong> beside the icon, which grows and takes a white rim, and its caption lights up; selecting one sparkles. The icons themselves never change.</p>
+<p>Click a dot or its caption to select it. The selected dot grows and takes a white rim, its caption lights up, and selecting one sparkles.</p>
 <p>The arrows at the two ends of the row <strong>undo</strong> and <strong>redo</strong> changes to the three
 target colors (up to 50 steps; a whole slider drag counts as one). Undo never
 touches the brush color.</p>
@@ -199,7 +199,7 @@ half-typed text.</p>
 <td>Vividness of the selected target: 100 is the most vivid color the gamut holds at that hue and lightness. The track re-renders as grey → full color at the current hue.</td>
 </tr>
 <tr>
-<td><strong>Light</strong></td>
+<td><strong>Value</strong></td>
 <td>0–100</td>
 <td>Perceived lightness of the <strong>base</strong> target only; hidden for shadow and light, which are derived from the base.</td>
 </tr>
@@ -439,6 +439,10 @@ crashes, because each change is saved as you make it.</p>
 painting (that is a per-session brush choice) and which target the sliders are
 currently editing. <strong>Reset all</strong> clears the saved file's contents too, so the
 next launch starts clean.</p>
+<p><strong>After an update</strong>, values you never changed move to the new defaults the
+first time Krita opens (for example the brighter highlight and the recalibrated
+light direction from 2.7.0); anything you set yourself is kept exactly. Press
+<strong>Reset all</strong> if you want every value back at the defaults.</p>
 <hr />
 <h2>Tips</h2>
 <ul>

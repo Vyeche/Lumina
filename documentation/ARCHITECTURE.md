@@ -276,6 +276,69 @@ Highlight-band error 3.36 → 2.24; peak brightness-and-position error
 now: black 0.784 (reference 0.76), blue 0.778 (0.76), green 0.912 (0.92).
 `test_highlight_peak_matches_the_reference_brightness` holds them.
 
+### Render pipeline (issue #56)
+
+![Render time at 288 px before and after the restructure, for a colour change, a lighting slider, moving the Sun and moving a Point or Area lamp](../images/render_speed.png)
+
+`render()` and `render_bgra()` (used by the processor) run a restructured pipeline. `render_reference()` is the original, kept unchanged:
+- it's the reference the fast path is held to (`test_fast_pipeline_is_bit_identical_to_the_reference`, at an even and an odd size);
+- engines that override the material stage or `render()` (the diagnostics) fall back to it.
+
+What changed, all bit-identical (every expression keeps the reference's order):
+
+- **Flat data, sphere pixels only.** The pipeline uses flat per-channel lists instead of rows of tuples, and loops only over the sphere's row spans (one run per row).
+- **Per-size tables, built once** (`_fast_geometry`): spans, the alpha bytes, each antialiased edge pixel's nearest interior pixel (the packer used to search for it on every render), and the blur normalisers.
+- **Light-dependent terms cached with the light** (`_fast_lighting`). Per pixel: the tonal weights, the shadow-hue index, the diffuse body factor, the ambient and reflected-light factors, the sky and ground weights, the clamped specular term and the mixer term. A colour change (Hue / Sat / Value, the commonest edit) reruns only the colour-and-display loop. Exact zeros are skipped: no specular where N·L is 0 or below the knee, and no reflected light on the lit side.
+- **Rim and glow weights** are cached per light and their settings (`_fast_accents`).
+- **Blur:** the masked separable blur uses whole-image shifted slices with the normaliser folded in (`_blur_flat`). That is exact when no sphere pixel touches the border (every even size). Otherwise it runs per row with edge replication (`_blur_pass`).
+- **sRGB:** encoded through a table already rounded to 8 bits, and written into the BGRA buffer by slice assignment.
+- **Sun's light stage** skips the per-pixel lamp calls (direction, illuminance and half vector are constant). The other lamps' normalisation is inlined.
+
+Each change in the chart above (measured by `tools/render_perf_chart.py`) runs on top of a cache that is already warm. A colour change at 288 px went from ~290 ms to ~100 ms; changes to lighting and the light run 1.3–1.7× faster. They are still bound by the per-pixel lighting pass and, for Point / Spot / Area, the per-pixel lamp evaluation. Those are the next places to look.
+
+### Lamp models (issue #53)
+
+All four go through the same light stage: per pixel, `_light_for_surface`
+gives a light direction and an illuminance, from which N·L, the half vector
+and the signed N·L for the shadow hue follow, so the fitted shading applies to
+every lamp. Only **Sun** was fitted against the reference spheres.
+
+- **Sun** — parallel light, illuminance 1, so the terminator is at 90°.
+- **Point** — a bulb at `LIGHT_DISTANCE` (3 radii), inverse square, with the
+  reference flux giving 1.0 at the sphere's centre. Its near side is about
+  2.1× brighter, and it lights a smaller cap: the terminator is at
+  acos(1/3) ≈ 70.5° from the light.
+- **Spot** — Point's light inside a 35° cone (`SPOT_OUTER_DEG`) aimed at the
+  centre, fading over its outer quarter (`SPOT_BLEND`): a lit pool with a
+  soft rim.
+- **Area** — a square panel `AREA_SIZE` (2 radii) across, facing the sphere.
+  It has Point's brightness times the panel's own cosine. As a disc of equal
+  area it spans an angular radius *a*, so over `|cos| < sin a` the cosine is
+  replaced by `(cos + sin a)² / (4 sin a)`, the standard horizon
+  approximation for a disc light. The light direction is bent toward the
+  normal to carry it, so the penumbra reaches the tonal path, the shadow hue
+  and the specular. It used to be about 18× too bright (the power was never
+  divided by 4π), which blew the lit side out to a hard edge, and
+  `AREA_SIZE` had no effect. Its highlight is a patch, not a point: the lobe
+  (knee included) is stretched in angle by f = √(1 + a²·n/2), where n is
+  the shininess, and its peak is divided by f² (`_area_spec_spread`), so the
+  same light spreads wider and dimmer.
+
+### Form zones on hover
+
+`ColorEngine.form_zone(u, v)` names the painter's zone at a sphere point: Highlight, Light, Halftone, Terminator, Core shadow or Reflected light. It uses the same light terms that shade the pixel:
+- the lamp's per-pixel direction and illuminance, so a Spot's beam and an Area's soft edge count;
+- the specular lobe, including Area's spread;
+- the reflected band's shape and direction.
+
+The hover readout appends it after H / S / V, so moving over the sphere shows where each band falls under the current lamp. Thresholds are the `ZONE_*` constants.
+
+### Talking to Krita's widget tree
+
+Never search Krita's whole main window from Python (`findChildren` on `qwindow()`). PyQt wraps every object it visits, and the objects inside Krita's QML panels print `QObject::connect: No such signal QQuickPalette::destroyed(QObject *)` (and three more) as they are wrapped. Lumina did this on every colour pick until #61.
+- The canvas pick watch searches the central area only.
+- The active-tool lookup searches only the Toolbox dock, taken from `Krita.instance().dockers()`.
+
 ## Persistence
 
 User settings are stored with `QSettings` in `IniFormat` under the flatpak's
@@ -297,6 +360,20 @@ Two design points worth keeping:
   *entire* state on every emission, so restoring its widgets one at a time pushes
   a half-applied mix of restored and still-default values back into the engine;
   `SettingsPanel.sync_from` blocks signals for the same reason.
+
+**Schema versions.** `SETTINGS_VERSION` is written with every save and read
+first on load; each bump migrates older files once. v6 (issue #57) handles
+defaults that changed without a bump: 2.7.0 recalibrated the lighting while
+settings stayed at v5. `migrate_settings_defaults` moves a value only if it
+still equals an old default in `V6_DEFAULT_CHANGES` (ambient 10→5, ground 2→1,
+sky 5→2, rim 14→10, spec_max 24→61, shininess 3→8.9, and the light 287°/45°→
+304°/41° only as a pair), and logs `SETTINGS_MIGRATED`. Anything else is the
+user's choice and stays. Files written by 2.7.0 are skipped: they are v5 too but already carry today's defaults (a Rim of 14 there is the Artistic preset), and are told apart by keys 2.6.0 never wrote (`V27_KEYS`). The old presets overlap the old defaults (the old default look was close to Artistic; 2.6.0's Gloss has ground 2 and spec_max 24), so a file that holds one 2.6.0 preset whole (`V26_PRESETS`, `match_v26_preset`) gets today's version of that preset instead of a per-value migration. Target colours are not migrated. When a default
+changes, bump the version and add the old value to the table.
+
+Shininess is saved with two decimals (as an int, the 8.9 default came back as
+8). The Specular row's handler is guarded by `_syncing`, and the preset path
+blocks its signals, so the integer slider never overwrites an exact value.
 
 
 ## Krita's color and Lumina's
@@ -321,7 +398,7 @@ when the user acts in Lumina (sphere click, *Use base color as brush*).
   on the way back.
 - **Routing.** A pick replaces whichever target is selected; with the base
   selected it is distributed into light and shadow as well. The readout under
-  the targets says so for 2.5 s ("Base <- Krita colour #hex").
+  the sphere says so for 2.5 s ("Base <- Krita colour #hex").
 - **Echo guard.** A sphere pick writes Krita's foreground, and the 50 ms watcher
   must not read that back as a Krita pick. `_send_to_krita` raises `_sync_guard`
   for the write and re-baselines the watcher on what Krita stored; on top of

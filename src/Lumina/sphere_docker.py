@@ -90,11 +90,14 @@ SHININESS_REF = 8.9
 DEFAULT_AZIMUTH = 304
 DEFAULT_ELEVATION = 41
 SHININESS_MAX = 64.0
-SPHERE_SIZE = 200          # smallest the sphere widget gets (narrow panel)
+SPHERE_SIZE = 180          # smallest the sphere widget gets (narrow panel; fits with both preset columns at ~315 px)
 SPHERE_MAX = 340           # largest it grows to as the panel widens
 # Captions under icons (presets, light type, targets): 9px dim grey was hard
 # to read on the dark panel.
 CAPTION_QSS = "QLabel { color: #d3dae6; font-size: 10px; background: transparent; }"
+# Undo / Redo captions: light grey, dimmer while there is nothing to undo.
+ARROW_CAPTION_QSS = "QLabel { color: #aab3c2; font-size: 10px; background: transparent; }"
+ARROW_CAPTION_OFF_QSS = "QLabel { color: #5f6878; font-size: 10px; background: transparent; }"
 CAPTION_ON_QSS = ("QLabel { color: #ffffff; font-size: 10px; font-weight: bold; "
                   "background: transparent; }")
 SPHERE_RENDER = 200        # engine render resolution (square)
@@ -127,7 +130,120 @@ PLUGIN_VERSION = "2.7.0"
 # slider levels to the perceptual curves (old linear positions reinterpreted
 # as old physical values, then mapped to equivalent new positions).
 # v5 persists the environment accents (rim, rim tint, sky, ground).
-SETTINGS_VERSION = 5
+# v6 moves values still at an old default to the current one (issue #57):
+# 2.7.0 recalibrated the lighting defaults without a version bump, so
+# settings saved on 2.5.1 / 2.6.0 kept the old ones until a Reset.
+SETTINGS_VERSION = 6
+
+# Defaults that changed while settings were at v5, in saved units: key ->
+# (old defaults, current default). A saved value equal to an old default was
+# never the user's choice, so it moves; anything else is kept. Measured from
+# a fresh 2.5.1 / 2.6.0 install against 2.7.0. Shininess was also saved as an
+# int, so the 8.9 default came back as 8 and counts as the default too.
+# Light direction moves only as a pair. Targets are not migrated: they are
+# colours the user works with, and Reset itself takes them from Krita.
+#
+# 2.7.0 also wrote v5, with today's defaults already in place, so a v5 file
+# from 2.7.0 must not be migrated: a Rim of 14 there is the Artistic preset,
+# not the old default. 2.7.0 files are told apart by keys 2.6.0 never wrote.
+V27_KEYS = ("sticky", "targets_profile", "highlight", "compact")
+
+# The six presets as 2.5.1 / 2.6.0 shipped them (saved keys only; the
+# highlight colour was not saved then). Their values overlap the old
+# defaults (the old default look was close to Artistic), so a file holding
+# one of them whole is a chosen preset, not untouched defaults: it gets
+# today's version of that preset (2.7.0 retuned all six) instead of a
+# per-value migration that would leave half a preset behind.
+V26_PRESETS = {
+    "artistic": {"ambient": 12, "intensity": 100, "contrast": 112, "specular": 8, "diffuse": 72,
+                 "glow": 0, "tone": 100, "mixer": "Blended", "spec_max": 24, "rim": 14,
+                 "rim_mix": 60, "sky": 5, "ground": 2},
+    "real": {"ambient": 10, "intensity": 100, "contrast": 92, "specular": 12, "diffuse": 72,
+             "glow": 0, "tone": 100, "mixer": "Blended", "spec_max": 20, "rim": 12,
+             "rim_mix": 50, "sky": 6, "ground": 3},
+    "nocturne": {"ambient": 4, "intensity": 92, "contrast": 118, "specular": 8, "diffuse": 45,
+                 "glow": 0, "tone": 88, "mixer": "Blended", "spec_max": 18, "rim": 18,
+                 "rim_mix": 80, "sky": 3, "ground": 1},
+    "gloss": {"ambient": 8, "intensity": 100, "contrast": 110, "specular": 28, "diffuse": 30,
+              "glow": 12, "tone": 105, "mixer": "Blended", "spec_max": 24, "rim": 16,
+              "rim_mix": 40, "sky": 4, "ground": 2},
+    "matte": {"ambient": 12, "intensity": 100, "contrast": 85, "specular": 5, "diffuse": 100,
+              "glow": 0, "tone": 96, "mixer": "Blended", "spec_max": 10, "rim": 6,
+              "rim_mix": 50, "sky": 8, "ground": 4},
+    "neon": {"ambient": 3, "intensity": 100, "contrast": 114, "specular": 12, "diffuse": 55,
+             "glow": 28, "tone": 118, "mixer": "Additive", "spec_max": 28, "rim": 20,
+             "rim_mix": 70, "sky": 2, "ground": 1},
+}
+
+
+def match_v26_preset(saved: dict):
+    """The 2.6.0 preset a saved setup holds whole, or None. ``saved`` maps
+    the settings keys to their stored values (numbers or strings)."""
+    for key, values in V26_PRESETS.items():
+        ok = True
+        for name, want in values.items():
+            have = saved.get(name)
+            if have is None:
+                ok = False
+                break
+            if isinstance(want, str):
+                if str(have) != want:
+                    ok = False
+                    break
+            else:
+                try:
+                    if abs(float(have) - float(want)) > 0.5:
+                        ok = False
+                        break
+                except (TypeError, ValueError):
+                    ok = False
+                    break
+        if ok:
+            return key
+    return None
+V6_DEFAULT_CHANGES = {
+    "ambient": ((10,), 5),
+    "ground": ((2,), 1),
+    "sky": ((5,), 2),
+    "rim": ((14,), 10),
+    "spec_max": ((24,), 61),
+    "specular": ((3, 8), SHININESS_REF),
+}
+V6_LIGHT_CHANGE = ((287, 45), (DEFAULT_AZIMUTH, DEFAULT_ELEVATION))
+
+
+def migrate_settings_defaults(values: dict, saved_version: int):
+    """Move values still at an old default to the current default.
+
+    ``values`` maps the saved keys (``ambient``, ``rim``, ``azimuth`` ...) to
+    numbers in their saved units. Returns ``(new_values, changes)``, where
+    ``changes`` lists ``(key, old, new)``. Nothing moves for settings already
+    at v6, and nothing that differs from an old default moves at all.
+    """
+    out = dict(values)
+    changes = []
+    if saved_version >= 6:
+        return out, changes
+    for key, (olds, new) in V6_DEFAULT_CHANGES.items():
+        if key not in out:
+            continue
+        try:
+            have = float(out[key])
+        except (TypeError, ValueError):
+            continue
+        if any(abs(have - float(o)) < 0.05 for o in olds):
+            out[key] = new
+            changes.append((key, values[key], new))
+    (old_az, old_el), (new_az, new_el) = V6_LIGHT_CHANGE
+    try:
+        if (round(float(out.get("azimuth", -1))) == old_az
+                and round(float(out.get("elevation", -1))) == old_el):
+            changes.append(("azimuth", out["azimuth"], new_az))
+            changes.append(("elevation", out["elevation"], new_el))
+            out["azimuth"], out["elevation"] = new_az, new_el
+    except (TypeError, ValueError):
+        pass
+    return out, changes
 # --- Persisted settings -----------------------------------------------------
 # Stored via QSettings so they land somewhere the user can find and back up. The
 # Inifile format is deliberate: it is a plain text file inside the flatpak's
@@ -145,7 +261,7 @@ _LEGACY_SETTINGS_APP = "LightingSphere"
 SRGB_PROFILE = "sRGB-elle-V2-srgbtrc.icc"
 # Labels of the hex-entry toggle under the active swatch. The box edits
 # whichever target is selected, so the label names it.
-HEX_EDIT_LABELS = {"shadow": "EDIT SHADE", "base": "EDIT BASE", "light": "EDIT HIGH"}
+HEX_EDIT_LABELS = {"shadow": "EDIT SHADE", "base": "EDIT BASE", "light": "EDIT LIGHT"}
 HEX_EDIT_LABEL = HEX_EDIT_LABELS["base"]
 HEX_DONE_LABEL = "DONE"
 
@@ -312,7 +428,9 @@ class LabeledSliderRow(QWidget):
         super().__init__(parent)
         self._unit = unit
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
+        # 6 px above and below (was 8): the rows read as a list rather than
+        # spaced-out islands, and more of the panel fits before it scrolls.
+        layout.setContentsMargins(10, 6, 10, 6)
         layout.setSpacing(10)
 
         # Accent dot (tiny color indicator).
@@ -327,6 +445,10 @@ class LabeledSliderRow(QWidget):
             f"QLabel {{ color: {TEXT_DIM.name()}; font-size: 11px; "
             f"font-weight: 600; letter-spacing: 0.3px; }}"
         )
+        # One label column for every row, so all the sliders start at the
+        # same x. The Hue / Sat / Value rows had it (set_caption) and the
+        # rest did not, so their tracks began further left.
+        self._label.setMinimumWidth(self.LABEL_WIDTH)
         layout.addWidget(self._label)
 
         # Rows are exactly as tall as they need to be. With the default
@@ -808,9 +930,20 @@ class _CanvasPickFilter(QObject):
 
     def watch(self, root) -> int:
         """Install on every canvas widget under ``root``; returns how many
-        were new. Canvases come and go with views, so this is re-run."""
+        were new. Canvases come and go with views, so this is re-run.
+
+        Only the main window's central area is searched: the canvases live
+        there. A findChildren over the whole window makes PyQt wrap the
+        objects inside Krita's QML panels (Text Properties), and each wrap
+        prints "QObject::connect: No such signal QQuickPalette::destroyed"
+        and three more like it to the terminal.
+        """
         added = 0
-        for widget in root.findChildren(QWidget):
+        try:
+            central = root.centralWidget() if hasattr(root, "centralWidget") else None
+        except Exception:  # pragma: no cover - defensive
+            central = None
+        for widget in (central or root).findChildren(QWidget):
             try:
                 if widget.metaObject().className() in self.CANVAS_CLASSES \
                         and widget not in self._watched:
@@ -923,7 +1056,7 @@ class LightTypeIconRow(QWidget):
         "Point": "Point: nearby lamp, brightness falls off with distance",
         "Sun": "Sun: distant parallel light, no falloff",
         "Spot": "Spot: cone beam with a soft edge",
-        "Area": "Area: broad panel, soft wrap",
+        "Area": "Area: broad panel, soft edge",
     }
 
     def __init__(self, current: str = "Point", parent=None):
@@ -1006,8 +1139,8 @@ class SphereDocker(DockWidget):
         "light":  "Light color (highlight; also controls brightness of light and shadow)",
     }
     # Short captions under the target row; the same words as EDIT SHADE /
-    # EDIT BASE / EDIT HIGH.
-    TARGET_CAPTIONS = {"shadow": "Shade", "base": "Base", "light": "High"}
+    # EDIT BASE / EDIT LIGHT.
+    TARGET_CAPTIONS = {"shadow": "Shade", "base": "Base", "light": "Light"}
 
     def _install_tooltip_style(self) -> None:
         """Give tooltips a readable background and text colour (issue #20).
@@ -1215,7 +1348,7 @@ class SphereDocker(DockWidget):
         # derived from the base, and giving them an independent brightness
         # control lets you dial a highlight down to nothing, which is not a
         # lighting decision worth exposing. Shown/hidden in _sync_sliders_from_state.
-        self.light_row = LabeledSliderRow(Accent.NEUTRAL, "Light", 0)
+        self.light_row = LabeledSliderRow(Accent.NEUTRAL, "Value", 0)
         self.contrast_row = LabeledSliderRow(Accent.NEUTRAL, "Contrast",
                                              int(round(_eng.contrast * 100)),
                                              hi=200)
@@ -1563,19 +1696,18 @@ class SphereDocker(DockWidget):
         self._hue_memory[self._active_target] = nh
 
     class TargetDot(QWidget):
-        """The live colour swatch shown beside a target's glyph.
+        """A target's live colour swatch, captioned Shade / Base / Light.
 
-        The reference pairs every icon with the colour it controls, so the row
-        reads at a glance as "shadow / base / highlight" with real values rather
-        than three anonymous glyphs. Selection is shown on *both* halves of the
-        pair -- the glyph takes a smooth white ring and this dot a full white
-        rim -- while the dot's own fill stays the real target colour.
+        The row reads at a glance as the real shadow, base and highlight
+        colours. Selection is a full white rim and a larger disc, while the
+        fill stays the target's real colour.
         """
 
         # All three swatches share one box so the row never jumps. The disc
         # itself grows when selected: small at rest, larger with the white
-        # rim when active.
-        BOX = 28
+        # rim when active. The box leaves room around the grown disc, so it
+        # never presses against the caption under it (at 28 it did).
+        BOX = 34
         SMALL = 15
         LARGE = 25      # was 19: the selected target stands out clearly
 
@@ -1586,10 +1718,7 @@ class SphereDocker(DockWidget):
             self._active = False
             self.setFixedSize(self.BOX, self.BOX)
             _set_tooltip(self, SphereDocker.TARGET_LABELS.get(key, key))
-            # Clickable, like the glyph beside it. The swatch is half the width
-            # of the pair and sits closest to the pointer when you aim for the
-            # colour itself, so making only the icon a target made the obvious
-            # thing to click the one thing that did nothing.
+            # Clicking the colour selects its target.
             self.setCursor(Qt.PointingHandCursor)
             self.setFocusPolicy(Qt.StrongFocus)
 
@@ -1604,7 +1733,7 @@ class SphereDocker(DockWidget):
                 self.update()
 
         def mousePressEvent(self, event):
-            """Select this target, exactly as clicking its glyph does."""
+            """Select this target."""
             cb = getattr(self, "on_click", None)
             if cb is not None:
                 cb(self.key)
@@ -1643,79 +1772,6 @@ class SphereDocker(DockWidget):
     # ------------------------------------------------------------------
     def _build_ui(self):
         """Build the Lighting Sphere panel (see issue #9 for the reference layout)."""
-
-        class TargetBtn(QPushButton):
-            """Small selectable dot: terminator (shadow) / ring (base) / rays (light).
-
-            One visual language for all three -- a dark-to-bright progression
-            on the same circle -- instead of three unrelated pictograms.
-            The active target gets a light outer ring. The previous version drew a
-            flat amber square because the pen state leaked between branches and
-            the glyphs were drawn with the QSS border-radius, so every branch now
-            sets both pen and brush explicitly and draws ring-only geometry.
-            """
-
-            def __init__(self, key: str, parent=None):
-                super().__init__(parent)
-                self.key = key
-                self.icon = key  # kept: existing code reads .icon
-                self.color = QColor(SphereDocker.TARGET_ACCENT.get(key, QColor(160, 174, 193)))
-                self.setFixedSize(34, 34)
-                self.setCursor(Qt.PointingHandCursor)
-                self.setFocusPolicy(Qt.StrongFocus)
-                self.setCheckable(True)
-                _set_tooltip(self, SphereDocker.TARGET_LABELS.get(key, key))
-                # No QSS background: paintEvent draws everything itself.
-                self.setStyleSheet("QPushButton { background: transparent; border: none; }")
-
-            def set_active(self, active: bool) -> None:
-                self.setChecked(bool(active))
-                self.update()
-
-            def paintEvent(self, event):
-                """Draw the terminator-theme glyphs: half-dark / ring / rays.
-
-                Shadow is a circle with its dark half filled (the terminator),
-                base is the plain ring (the object itself), light is the ring
-                with short rays (the lit side). Colour comes from the swatch
-                beside the glyph, so the glyph itself only has to say *which
-                role* it plays. Glyphs never take a selection mark -- that
-                lives on the color swatch alone.
-                """
-                try:
-                    p = QPainter(self)
-                    p.setRenderHint(QPainter.Antialiasing, True)
-                    w, h = self.width(), self.height()
-                    cx, cy = w / 2.0, h / 2.0
-                    # One ink for all three; glyphs stay hollow either way.
-                    ink = QColor(216, 224, 236)
-                    p.setPen(QPen(ink, 1.9, Qt.SolidLine, Qt.RoundCap,
-                                  Qt.RoundJoin))
-                    p.setBrush(Qt.NoBrush)
-
-                    if self.icon == "shadow":
-                        # Terminator: outline circle with the dark half filled.
-                        p.drawEllipse(QRectF(cx - 5.5, cy - 5.5, 11.0, 11.0))
-                        p.setPen(Qt.NoPen)
-                        p.setBrush(ink)
-                        p.drawPie(QRectF(cx - 5.5, cy - 5.5, 11.0, 11.0),
-                                  90 * 16, 180 * 16)
-                    elif self.icon == "base":
-                        # The object itself: plain ring.
-                        p.drawEllipse(QRectF(cx - 5.5, cy - 5.5, 11.0, 11.0))
-                    else:
-                        # Lit side: smaller ring with four short rays.
-                        p.drawEllipse(QRectF(cx - 4.4, cy - 4.4, 8.8, 8.8))
-                        for deg in (45.0, 135.0, 225.0, 315.0):
-                            a = math.radians(deg)
-                            dx, dy = math.cos(a), math.sin(a)
-                            p.drawLine(
-                                QPointF(cx + dx * 6.2, cy + dy * 6.2),
-                                QPointF(cx + dx * 8.6, cy + dy * 8.6),
-                            )
-                    p.end()
-                except Exception as exc:  # pragma: no cover - cosmetic paint only
-                    print(f"Lumina: TargetBtn.paintEvent failed - {exc}")
 
         # ------------------------------------------------------------------
         # Header
@@ -1812,7 +1868,7 @@ class SphereDocker(DockWidget):
         # unit (fixed-width hash + tight button) so no gap opens up, and
         # both sit on the same 20px line.
         self._hex_locked = True
-        # "EDIT SHADE" / "EDIT BASE" / "EDIT HIGH": typed hex values change
+        # "EDIT SHADE" / "EDIT BASE" / "EDIT LIGHT": typed hex values change
         # the selected target, and the label says which one.
         edit = QPushButton(HEX_EDIT_LABEL)
         # Wide enough for the longer of the two labels in Krita's own UI
@@ -1906,7 +1962,8 @@ class SphereDocker(DockWidget):
             return cell
 
         def _preset_column(indexes):
-            col = QVBoxLayout()
+            box = QWidget()
+            col = QVBoxLayout(box)
             col.setContentsMargins(0, 0, 0, 0)
             col.setSpacing(4)
             col.addStretch(1)
@@ -1914,26 +1971,44 @@ class SphereDocker(DockWidget):
                 col.addWidget(_preset_cell(self._preset_btns[i], _PRESETS[i]),
                               alignment=Qt.AlignCenter)
             col.addStretch(1)
-            return col
+            return box
 
         # Lamp model sits directly above the sphere as icon buttons, like the
         # preset cells: it visibly reshapes the sphere, so it belongs with it
         # rather than buried in Advanced.
         sphere_layout.addWidget(self.light_type_row)
         sphere_layout.addSpacing(6)
+        # Both columns take the wider one's width, so the sphere sits in the
+        # middle with the same gap on each side ("Nocturne" is wider than
+        # "Gloss", and the uneven columns pushed the sphere off centre). Past
+        # the sphere's largest size, the outer stretches keep the group
+        # centred rather than leaving the spare width on one side.
+        left_col = _preset_column((0, 1, 2))
+        right_col = _preset_column((3, 4, 5))
+        col_w = max(left_col.sizeHint().width(), right_col.sizeHint().width())
+        left_col.setFixedWidth(col_w)
+        right_col.setFixedWidth(col_w)
+        self._preset_cols = (left_col, right_col)
         sphere_row = QHBoxLayout()
         sphere_row.setContentsMargins(0, 0, 0, 0)
-        sphere_row.setSpacing(2)
-        sphere_row.addLayout(_preset_column((0, 1, 2)), 0)
+        sphere_row.setSpacing(6)
+        sphere_row.addStretch(0)
+        sphere_row.addWidget(left_col, 0)
         sphere_row.addWidget(sphere_holder, 1)
-        sphere_row.addLayout(_preset_column((3, 4, 5)), 0)
+        sphere_row.addWidget(right_col, 0)
+        sphere_row.addStretch(0)
         sphere_layout.addLayout(sphere_row)
 
+        # The hover readout sits right under the sphere it describes, in a
+        # line of its own that is always reserved, so it never shifts the
+        # row below or presses against the Shade / Base / Light captions.
         self._readout = QLabel("")
         self._readout.setAlignment(Qt.AlignCenter)
-        self._readout.setFixedHeight(14)
+        self._readout.setFixedHeight(16)
         self._readout.setStyleSheet(
             "QLabel { color: %s; font-size: 10px; }" % TEXT_DIM.name())
+        sphere_layout.addWidget(self._readout)
+        sphere_layout.addSpacing(8)
         layout.addWidget(sphere_frame)
 
         # ------------------------------------------------------------------
@@ -1946,57 +2021,61 @@ class SphereDocker(DockWidget):
         # them a QHBoxLayout spreads the fixed-size buttons across the full panel
         # width, which left the three dots marooned at the far edges.
         # Undo / redo of target colour changes, at the row's two ends.
-        self._undo_btn = ToolButton(Accent.NEUTRAL, glyph="undo", size=26, checkable=False)
-        self._redo_btn = ToolButton(Accent.NEUTRAL, glyph="redo", size=26, checkable=False)
-        _set_tooltip(self._undo_btn, "Undo the last change to Shade / Base / High")
+        self._undo_btn = ToolButton(Accent.NEUTRAL, glyph="undo", size=34, checkable=False)
+        self._redo_btn = ToolButton(Accent.NEUTRAL, glyph="redo", size=34, checkable=False)
+        # They read too small at 26 px: a bigger button, and the arrow drawn
+        # larger within it.
+        self._undo_btn.glyph_scale = self._redo_btn.glyph_scale = 1.35
+        _set_tooltip(self._undo_btn, "Undo the last change to Shade / Base / Light")
         _set_tooltip(self._redo_btn, "Redo")
         self._undo_btn.clicked.connect(self._undo_targets)
         self._redo_btn.clicked.connect(self._redo_targets)
-        target_row.addWidget(self._undo_btn, 0, Qt.AlignVCenter)
+        def _arrow_cell(btn, text):
+            # The same width as a preset column, so each arrow sits exactly
+            # under the presets above it, captioned like them.
+            cell = QWidget()
+            cell.setFixedWidth(col_w)
+            cv = QVBoxLayout(cell)
+            cv.setContentsMargins(0, 0, 0, 0)
+            cv.setSpacing(1)
+            cv.addWidget(btn, alignment=Qt.AlignCenter)
+            cap = QLabel(text)
+            cap.setAlignment(Qt.AlignCenter)
+            cap.setStyleSheet(ARROW_CAPTION_QSS)
+            cv.addWidget(cap)
+            return cell, cap
+
+        undo_cell, self._undo_cap = _arrow_cell(self._undo_btn, "Undo")
+        redo_cell, self._redo_cap = _arrow_cell(self._redo_btn, "Redo")
+        target_row.addWidget(undo_cell, 0, Qt.AlignVCenter)
         target_row.addStretch(1)
-        self._target_btns = []
         self._target_dots = {}
         self._target_caps = {}
         for key in self.TARGET_ORDER:
-            btn = TargetBtn(key)
-            btn.clicked.connect(lambda _c, k=key: self._select_target(k))
-            # Each target shows the colour it currently holds, so the row reads
-            # as "shadow / base / highlight" with the actual values rather than
-            # three unlabelled glyphs.
-            cell = QWidget()
-            cv = QHBoxLayout(cell)
-            cv.setContentsMargins(0, 0, 0, 0)
-            # Tight inside a pair, and the wider gap lives between pairs, so each
-            # icon reads as belonging to the swatch beside it. With even spacing
-            # throughout the six items looked like one undifferentiated row.
-            cv.setSpacing(3)
-            cv.addWidget(btn, alignment=Qt.AlignCenter)
-            # TargetDot is a class attribute, so it needs qualifying here:
-            # TargetBtn is declared inside this method and resolves by bare name,
-            # but names in the class body are not in scope for its methods.
-            dot = SphereDocker.TargetDot(key, parent=cell)
-            dot.on_click = self._select_target
-            cv.addWidget(dot, alignment=Qt.AlignCenter)
-            self._target_dots[key] = dot
-            # Caption under the pair: which target it is, the selected one lit.
+            # Each target is its colour and its name: the swatch shows the
+            # colour it holds, the caption under it which target it is, and
+            # either one selects it.
             stack = QWidget()
             sv = QVBoxLayout(stack)
             sv.setContentsMargins(0, 0, 0, 0)
-            sv.setSpacing(0)
-            sv.addWidget(cell, alignment=Qt.AlignCenter)
+            sv.setSpacing(4)
+            # TargetDot is a class attribute, so it needs qualifying here.
+            dot = SphereDocker.TargetDot(key, parent=stack)
+            dot.on_click = self._select_target
+            sv.addWidget(dot, alignment=Qt.AlignCenter)
+            self._target_dots[key] = dot
             cap = QLabel(self.TARGET_CAPTIONS.get(key, key))
             cap.setAlignment(Qt.AlignCenter)
             cap.setStyleSheet(CAPTION_QSS)
+            cap.setCursor(Qt.PointingHandCursor)
+            cap.mousePressEvent = lambda _e, k=key: self._select_target(k)
             sv.addWidget(cap, alignment=Qt.AlignCenter)
             self._target_caps[key] = cap
             target_row.addWidget(stack, alignment=Qt.AlignCenter)
-            self._target_btns.append(btn)
         target_row.addStretch(1)
-        target_row.addWidget(self._redo_btn, 0, Qt.AlignVCenter)
-        # Dots live inside the sphere frame, tucked under the sphere, with the
-        # hover readout below them.
+        target_row.addWidget(redo_cell, 0, Qt.AlignVCenter)
+        # Dots live inside the sphere frame, under the sphere and its readout.
         sphere_layout.addLayout(target_row)
-        sphere_layout.addWidget(self._readout)
         # Breathing room between the sphere frame and the Hue slider.
         layout.addSpacing(6)
 
@@ -2006,6 +2085,9 @@ class SphereDocker(DockWidget):
         layout.addWidget(self.hue_row)
         layout.addWidget(self.saturation_row)
         layout.addWidget(self.light_row)
+        # Hue / Sat / Value edit the selected target; Contrast and Intensity
+        # light the whole scene. A small gap reads them as the two groups.
+        layout.addSpacing(8)
         layout.addWidget(self.contrast_row)
         layout.addWidget(self.power_row)
 
@@ -2016,7 +2098,12 @@ class SphereDocker(DockWidget):
         self._recent.bind(self._on_recent_pick, self._on_recent_assign,
                           self._mark_settings_dirty)
         layout.addSpacing(4)
-        layout.addWidget(self._recent)
+        # Indented like the slider rows' content, so its left edge lines up
+        # with theirs rather than with the panel edge.
+        recent_row = QHBoxLayout()
+        recent_row.setContentsMargins(10, 0, 10, 0)
+        recent_row.addWidget(self._recent)
+        layout.addLayout(recent_row)
 
         # (Presets now flank the sphere above, three per side, instead of a grid
         # here: at panel width the 3x2 grid pushed everything else down, and the
@@ -2249,7 +2336,7 @@ class SphereDocker(DockWidget):
     # State -> UI sync
     # ------------------------------------------------------------------
     def _select_target(self, key: str) -> None:
-        """The user picked Shade, Base or High: select it, with sparkles."""
+        """The user picked Shade, Base or Light: select it, with sparkles."""
         self._on_target_changed(key)
         try:
             dot = self._target_dots.get(key)
@@ -2270,7 +2357,7 @@ class SphereDocker(DockWidget):
             self._sync_sliders_from_state()
             self._update_preview()
             # The hex toggle names the target it edits (EDIT SHADE / BASE /
-            # HIGH); re-apply the lock state to refresh that label.
+            # LIGHT); re-apply the lock state to refresh that label.
             self._set_hex_locked(getattr(self, "_hex_locked", True))
             # Target-sync stamp (Q3): version + loaded module + target HSV +
             # row values. A stale install shows the wrong path; a bypassed
@@ -2290,12 +2377,10 @@ class SphereDocker(DockWidget):
             print(f"Lumina: on_target_changed failed - {exc}")
 
     def _sync_target_buttons(self) -> None:
-        for btn in getattr(self, "_target_btns", []):
-            btn.set_active(btn.key == self._active_target)
         self._sync_target_dots()
 
     def _sync_target_dots(self) -> None:
-        """Show each target's current colour beside its glyph."""
+        """Show each target's current colour, the selected one lit."""
         for key, dot in getattr(self, "_target_dots", {}).items():
             color = self._targets.get(key)
             if color is not None:
@@ -2340,9 +2425,8 @@ class SphereDocker(DockWidget):
             # rounded readout. (Glow has no dependent slider: intensity is
             # the only control.)
             self._sync_rim_interlock()
-            # Name the target these rows are editing. Now that Light applies to
-            # all three, "Light" alone is ambiguous: it could mean the base's
-            # lightness or the highlight's.
+            # Name the target these rows are editing: "Value" alone could be
+            # the base's or the highlight's.
             self._sync_slider_captions()
         finally:
             self._syncing = False
@@ -2371,25 +2455,17 @@ class SphereDocker(DockWidget):
             LOG.exception("_sync_rim_interlock failed")
 
     def _sync_slider_captions(self) -> None:
-        """Label the three colour sliders with the target they currently edit.
+        """Label the three colour sliders with the target they currently edit,
+        by the name under its dot: "Hue (light)", "Sat (shade)", "Value (base)".
 
-        "Hue / Saturation / Light" is ambiguous once Light applies to all three
-        targets: it could read as "the base's lightness" or "the highlight's".
-
-        The label names the target's *role* rather than its key, because
-        "Light (Light)" is not a caption anyone should have to read. The value
-        row is the base colour, and light/shadow are the highlight and the dark
-        side of it, which is what the panel is actually modelling.
+        The lightness slider is "Value" (the painter's word for how light or
+        dark a colour is), so the Light target never reads "Light (light)".
         """
-        role = {
-            "base": "base",
-            "light": "high",
-            "shadow": "shade",
-        }.get(self._active_target, self._active_target)
+        role = self.TARGET_CAPTIONS.get(self._active_target, self._active_target).lower()
 
         for row, base_name in ((self.hue_row, "Hue"),
                                (self.saturation_row, "Sat"),
-                               (self.light_row, "Light")):
+                               (self.light_row, "Value")):
             try:
                 row.set_caption("{0} ({1})".format(base_name, role))
             except Exception:  # pragma: no cover - cosmetic only
@@ -2483,6 +2559,11 @@ class SphereDocker(DockWidget):
         if undo is not None:
             undo.setEnabled(bool(self._hist_undo) or self._hist_timer.isActive())
             self._redo_btn.setEnabled(bool(self._hist_redo))
+            for btn, cap in ((undo, getattr(self, "_undo_cap", None)),
+                             (self._redo_btn, getattr(self, "_redo_cap", None))):
+                if cap is not None:
+                    cap.setStyleSheet(ARROW_CAPTION_QSS if btn.isEnabled()
+                                      else ARROW_CAPTION_OFF_QSS)
 
     def _set_compact(self, compact: bool) -> None:
         """Compact panel: hide the captions (presets, lamps, targets,
@@ -2491,6 +2572,7 @@ class SphereDocker(DockWidget):
         labels = (list(getattr(self, "_preset_caps", []))
                   + list(getattr(getattr(self, "light_type_row", None), "captions", []))
                   + list(getattr(self, "_target_caps", {}).values())
+                  + [getattr(self, "_undo_cap", None), getattr(self, "_redo_cap", None)]
                   + [getattr(self, "_cap_prev", None), getattr(self, "_cap_now", None),
                      getattr(self, "_recent", None)])
         for w in labels:
@@ -2889,7 +2971,8 @@ class SphereDocker(DockWidget):
             "contrast": int(eng.contrast * 100.0),
             "intensity": int(eng.light_intensity * 100.0),
             "ambient": int(eng.ambient * 100.0),
-            "specular": int(eng.shininess),
+            # Two decimals: as an int, the 8.9 default came back as 8.
+            "specular": round(float(eng.shininess), 2),
             "spec_max": int(round(float(getattr(eng, "spec_max", 0.24)) * 100.0)),
             "rim": int(round(float(getattr(eng, "rim_light", 0.14)) * 100.0)),
             "rim_mix": int(round(float(getattr(eng, "rim_sky_mix", 0.60)) * 100.0)),
@@ -3040,6 +3123,19 @@ class SphereDocker(DockWidget):
                 self._base_level_last = 100
                 self.color_row.set_value(int(num("base_level", 100, 0, 100)))
 
+                # v6: values still at an old default move to the current one,
+                # for files saved before 2.7.0 only (see V27_KEYS).
+                if saved_version < 6 and not any(s.contains(k) for k in V27_KEYS):
+                    old_preset = match_v26_preset(
+                        {k: s.value(k) for k in V26_PRESETS["artistic"] if s.contains(k)})
+                    if old_preset is not None:
+                        now = next(p for p in _PRESETS if p["key"] == old_preset)
+                        self._apply_preset_values(now["values"])
+                        LOG.info("SETTINGS_MIGRATED preset %s -> today's %s (from v%d)",
+                                 old_preset, old_preset, saved_version)
+                    else:
+                        self._migrate_saved_defaults(saved_version)
+
                 # Push the restored numbers back into the widgets, still inside
                 # the _syncing guard: the settings popup re-emits as its widgets
                 # are set, and each of those emissions would otherwise apply a
@@ -3068,6 +3164,32 @@ class SphereDocker(DockWidget):
         except Exception as exc:  # pragma: no cover - startup path
             LOG.exception("_load_settings failed")
             print(f"Lumina: could not load settings - {exc}")
+
+    def _migrate_saved_defaults(self, saved_version: int) -> None:
+        """Apply migrate_settings_defaults to the just-loaded engine state."""
+        eng = self.processor.engine
+        now = {
+            "ambient": eng.ambient * 100.0,
+            "ground": eng.ground_bounce * 100.0,
+            "sky": eng.sky_bounce * 100.0,
+            "rim": eng.rim_light * 100.0,
+            "spec_max": float(eng.spec_max) * 100.0,
+            "specular": float(eng.shininess),
+            "azimuth": float(eng.light_azimuth),
+            "elevation": float(eng.light_elevation),
+        }
+        new, changes = migrate_settings_defaults(now, saved_version)
+        if not changes:
+            return
+        self.processor.set_ambient(new["ambient"] / 100.0)
+        self.processor.set_ground_bounce(new["ground"] / 100.0)
+        self.processor.set_sky_bounce(new["sky"] / 100.0)
+        self.processor.set_rim_light(new["rim"] / 100.0)
+        self.processor.set_spec_max(new["spec_max"] / 100.0)
+        self.processor.set_shininess(new["specular"])
+        eng.set_light_angle(new["azimuth"], new["elevation"])
+        for key, old, value in changes:
+            LOG.info("SETTINGS_MIGRATED %s %s -> %s (from v%d)", key, old, value, saved_version)
 
     def _sync_settings_panel(self) -> None:
         """Mirror the engine state back into the settings popup's widgets.
@@ -3798,6 +3920,10 @@ class SphereDocker(DockWidget):
 
     def _on_specular_changed(self, value):
         try:
+            if self._syncing:
+                # Restoring settings sets this row from the exact shininess;
+                # the int slider value must not overwrite it (8.9 became 8).
+                return
             LOG.info(f"_on_specular_changed value={value}")
             self.processor.set_shininess(value)
             self._rebuild_sphere()
@@ -4114,7 +4240,17 @@ class SphereDocker(DockWidget):
                           ("sky", self.sky_row),
                           ("ground", self.ground_row)):
             if name in values:
-                row.set_value(int(values[name]))
+                if row is self.specular_row:
+                    # Blocked, as in Reset: the row's handler has no _syncing
+                    # guard and would push the rounded slider value back over
+                    # the exact shininess set above (28.16 came back as 28).
+                    row.slider.blockSignals(True)
+                    try:
+                        row.set_value(int(values[name]))
+                    finally:
+                        row.slider.blockSignals(False)
+                else:
+                    row.set_value(int(values[name]))
 
     # ------------------------------------------------------------------
     # Krita integration
@@ -4507,11 +4643,21 @@ class SphereDocker(DockWidget):
     SPHERE_ECHO_MS = 350
 
     def _tool_for_log(self) -> str:
-        """Krita's active tool, for the log (best effort)."""
+        """Krita's active tool, for the log (best effort).
+
+        Searches the Toolbox dock only, got from Krita's own docker list. It
+        used to scan the whole main window on every Krita colour pick, which
+        wrapped the objects inside Krita's QML panels and printed a block of
+        "QObject::connect: No such signal ...::destroyed" warnings each time.
+        """
         try:
             from PyQt5.QtWidgets import QToolButton
-            win = self.window()
-            for b in win.findChildren(QToolButton):
+            from krita import Krita
+            toolbox = next((d for d in Krita.instance().dockers()
+                            if d.objectName() == "ToolBox"), None)
+            if toolbox is None:
+                return "?"
+            for b in toolbox.findChildren(QToolButton):
                 name = b.objectName()
                 if b.isCheckable() and b.isChecked() and name.startswith(("Kis", "Krita")):
                     return name
@@ -4927,8 +5073,18 @@ class SphereDocker(DockWidget):
                 # lightness); the hex is on the lemon's pill, so the RGB
                 # numbers here only repeated it.
                 h, c, L = _rgb_to_lch((value.red(), value.green(), value.blue()))
-                self._readout.setText("H %d\u00b0   S %d%%   L %d%%" % (
-                    int(round(h)) % 360, int(round(c * 100)), int(round(L * 100))))
+                text = "H %d\u00b0   S %d%%   V %d%%" % (
+                    int(round(h)) % 360, int(round(c * 100)), int(round(L * 100)))
+                # Name the form zone under the pointer (Light, Halftone,
+                # Terminator, Core shadow, Reflected light, Highlight), so the
+                # sphere teaches where each one falls under this lamp.
+                uv = getattr(self._sphere, "hover_uv", None)
+                if uv is not None:
+                    try:
+                        text += "   \u00b7   " + self.processor.engine.form_zone(*uv)
+                    except Exception:  # pragma: no cover - cosmetic only
+                        LOG.exception("form zone failed")
+                self._readout.setText(text)
                 # The hex a click would send, under the lemon.
                 self.cylinder.set_label(value.name())
                 self.cylinder.set_color(color)

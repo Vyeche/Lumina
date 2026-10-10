@@ -1165,7 +1165,7 @@ def test_conversion_is_not_cached_before_the_profile_loads(monkeypatch):
 
 @requires_qt
 def test_hex_box_edits_the_selected_target():
-    """EDIT SHADE / EDIT BASE / EDIT HIGH: the hex box follows the target.
+    """EDIT SHADE / EDIT BASE / EDIT LIGHT: the hex box follows the target.
 
     It shows the selected target, its label names it, and typing a colour
     changes that target: base derives light and shadow, shadow or highlight
@@ -1192,7 +1192,7 @@ def test_hex_box_edits_the_selected_target():
     d._set_hex_locked(True)
 
     d._on_target_changed("light")
-    assert d._hex_lock_btn.text() == "EDIT HIGH"
+    assert d._hex_lock_btn.text() == "EDIT LIGHT"
     assert d._hex_current.text() == d._targets["light"].name()
     shown = d._hex_current.text()
     d._on_sphere_brush(QColor("#ff00ff"))     # a sphere click: brush only
@@ -1517,7 +1517,7 @@ def test_target_row_has_captions_with_the_selected_one_lit():
     _app_or_skip()
     d = _switch_docker()
     caps = d._target_caps
-    assert {k: c.text() for k, c in caps.items()} == {"shadow": "Shade", "base": "Base", "light": "High"}
+    assert {k: c.text() for k, c in caps.items()} == {"shadow": "Shade", "base": "Base", "light": "Light"}
     d._on_target_changed("light")
     assert "bold" in caps["light"].styleSheet() and "bold" not in caps["base"].styleSheet()
 
@@ -1747,7 +1747,7 @@ def test_readout_shows_the_hovered_colour_in_slider_units():
     d = _switch_docker()
     d._on_sphere_hover(QColor("#00e700"))
     text = d._readout.text()
-    assert text.startswith("H ") and "S " in text and "L " in text and "," not in text
+    assert text.startswith("H ") and "S " in text and "V " in text and "," not in text
 
 
 @requires_qt
@@ -1826,7 +1826,7 @@ def test_a_krita_colour_replacing_a_target_says_so():
     d._send_to_krita = lambda c: None
     d._on_target_changed("light")
     d._apply_sampled_color((171, 155, 124))
-    assert d._readout.text() == "High ← Krita colour #ab9b7c"
+    assert d._readout.text() == "Light ← Krita colour #ab9b7c"
     d._clear_krita_cue()
     assert d._readout.text() == ""
 
@@ -2150,3 +2150,281 @@ def test_a_preview_cancels_the_background_render_it_replaces():
     _wait_full_render(app, d)
     _wait_full_render(app, d)
     d.close()
+
+
+@requires_qt
+def test_sphere_sits_centred_between_equal_preset_columns():
+    """Both preset columns take the same width, so the sphere is centred
+    with the same gap each side ("Nocturne" is wider than "Gloss" and used to
+    push it off centre), and the row fits a narrow panel."""
+    app = _app_or_skip()
+    import time
+    from PyQt5.QtCore import QPoint
+    from Lumina.sphere_docker import SphereDocker
+    for width in (340, 450, 620):
+        d = SphereDocker()
+        d.resize(width, 950)
+        d.show()
+        for _ in range(20):
+            app.processEvents()
+            time.sleep(0.005)
+        # Centred in the scroll content: when the panel scrolls, its
+        # scrollbar takes the right-hand edge.
+        main = d._scroll.widget()
+        left, right = d._preset_cols
+        assert left.width() == right.width()
+        ox, _oy, dia = d._sphere._sphere_geometry()
+        x0 = d._sphere.mapTo(main, QPoint(0, 0)).x() + ox
+        lx = left.mapTo(main, QPoint(0, 0)).x() + left.width()
+        rx = right.mapTo(main, QPoint(0, 0)).x()
+        assert abs((x0 - lx) - (rx - (x0 + dia))) <= 1, (width, x0, dia, lx, rx)
+        assert abs((x0 + dia / 2.0) - main.width() / 2.0) <= 1.5, (width, x0, dia, main.width())
+        assert rx + right.width() <= main.width(), (width, rx, right.width(), main.width())
+        d.close()
+    # The row alone (two columns, the smallest sphere, two gaps) fits 300 px.
+    from Lumina.sphere_docker import SPHERE_SIZE
+    assert 2 * left.width() + SPHERE_SIZE + 12 <= 300, left.width()
+
+
+@requires_qt
+def test_targets_are_their_colour_and_name_only():
+    """The Shade / Base / Light row shows each target's colour dot and its
+    caption, no glyph icons; clicking either the dot or the caption selects it."""
+    _app_or_skip()
+    from PyQt5.QtCore import QPointF, Qt
+    from PyQt5.QtGui import QMouseEvent
+    from PyQt5.QtCore import QEvent
+    d = _switch_docker()
+    assert not hasattr(d, "_target_btns")
+    for key, dot in d._target_dots.items():
+        cell = dot.parentWidget()
+        kinds = {type(w).__name__ for w in cell.children() if getattr(w, "isWidgetType", lambda: False)()}
+        assert kinds == {"TargetDot", "QLabel"}, (key, kinds)
+    d._target_caps["shadow"].mousePressEvent(
+        QMouseEvent(QEvent.MouseButtonPress, QPointF(2, 2), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+    assert d._active_target == "shadow"
+    d._target_dots["light"].mousePressEvent(
+        QMouseEvent(QEvent.MouseButtonPress, QPointF(2, 2), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+    assert d._active_target == "light"
+
+
+@requires_qt
+def test_selected_dot_keeps_clear_of_its_caption_and_sliders_say_value():
+    """The grown (selected) disc leaves room above its caption; the lightness
+    slider is "Value", so captions read "Hue (light)", never "Light (light)";
+    the undo / redo arrows are a comfortable size."""
+    app = _app_or_skip()
+    from PyQt5.QtCore import QPoint
+    d = _switch_docker()
+    d.resize(450, 950)
+    d.show()
+    app.processEvents()
+    dot, cap = d._target_dots["base"], d._target_caps["base"]
+    d._on_target_changed("base")
+    disc_bottom = dot.mapTo(d, QPoint(0, 0)).y() + (dot.BOX + dot.LARGE) / 2.0
+    assert cap.mapTo(d, QPoint(0, 0)).y() - disc_bottom >= 6, (disc_bottom, cap.geometry())
+    assert d.light_row._label.toolTip().startswith("Value (") or "Value" in d.light_row._label.text()
+    d._on_target_changed("light")
+    assert d.hue_row._label.toolTip() == "Hue (light)" or d.hue_row._label.text() == "Hue (light)"
+    assert d._undo_btn.width() >= 34 and d._redo_btn.width() >= 34
+    d.hide()
+
+
+@requires_qt
+def test_every_slider_track_starts_and_ends_at_the_same_x():
+    """One label column for all rows: Hue / Sat / Value used to start
+    further right than Contrast, Intensity and the Advanced rows."""
+    app = _app_or_skip()
+    from PyQt5.QtCore import QPoint
+    from Lumina.sphere_docker import LabeledSliderRow
+    d = _switch_docker()
+    d.resize(450, 1400)
+    d.show()
+    for _ in range(10):
+        app.processEvents()
+    rows = [r for r in d.findChildren(LabeledSliderRow) if r.isVisible()]
+    spans = {(r.slider.mapTo(d, QPoint(0, 0)).x(), r.slider.width()) for r in rows}
+    assert len(rows) >= 5 and len(spans) == 1, spans
+    d.hide()
+
+
+@requires_qt
+def test_arrows_sit_under_the_presets_and_the_readout_under_the_sphere():
+    """Undo / Redo are captioned and centred under the preset columns; the
+    hover readout has its own line under the sphere, clear of the target
+    row, so it never clashes with the Shade / Base / Light captions."""
+    app = _app_or_skip()
+    from PyQt5.QtCore import QPoint
+    from PyQt5.QtGui import QColor
+    d = _switch_docker()
+    d.resize(451, 950)
+    d.show()
+    for _ in range(10):
+        app.processEvents()
+    c = d._scroll.widget()
+    cx = lambda w: w.mapTo(c, QPoint(0, 0)).x() + w.width() / 2.0
+    top = lambda w: w.mapTo(c, QPoint(0, 0)).y()
+    assert abs(cx(d._undo_btn) - cx(d._preset_cols[0])) <= 1
+    assert abs(cx(d._redo_btn) - cx(d._preset_cols[1])) <= 1
+    assert d._undo_cap.text() == "Undo" and d._redo_cap.text() == "Redo"
+    d._on_sphere_hover(QColor("#16da12"))
+    sphere_bottom = top(d._sphere) + d._sphere.height()
+    assert sphere_bottom <= top(d._readout)
+    assert top(d._readout) + d._readout.height() + 6 <= top(d._target_dots["base"])
+    d.hide()
+
+
+@requires_qt
+def test_recent_picks_line_up_with_the_slider_rows():
+    app = _app_or_skip()
+    from PyQt5.QtCore import QPoint
+    d = _switch_docker()
+    d.resize(451, 950)
+    d.show()
+    for _ in range(10):
+        app.processEvents()
+    c = d._scroll.widget()
+    row_x = d.hue_row._dot.mapTo(c, QPoint(0, 0)).x()
+    assert abs(d._recent.mapTo(c, QPoint(0, 0)).x() - row_x) <= 1
+    d.hide()
+
+
+@requires_qt
+def test_hover_readout_names_the_form_zone():
+    _app_or_skip()
+    from PyQt5.QtGui import QColor
+    d = _switch_docker()
+    d._sphere.hover_uv = (0.0, 0.0)
+    d._on_sphere_hover(QColor("#00e700"))
+    zone = d._readout.text().split("·")[-1].strip()
+    assert zone in ("Highlight", "Light", "Halftone", "Terminator",
+                    "Core shadow", "Reflected light"), d._readout.text()
+    d._sphere.hover_uv = (-0.6, 0.75)          # lower left: away from the light
+    d._on_sphere_hover(QColor("#00e700"))
+    assert d._readout.text().split("·")[-1].strip() in ("Core shadow", "Reflected light")
+
+
+@requires_qt
+def test_canvas_watch_searches_the_central_area_only():
+    """Scanning the whole Krita window made PyQt wrap the objects inside its
+    QML panels, which printed "No such signal QQuickPalette::destroyed" and
+    three more each time. The canvases live in the central area; the docks
+    (where the QML panels are) are never walked."""
+    _app_or_skip()
+    from PyQt5.QtWidgets import QMainWindow, QDockWidget, QWidget, QVBoxLayout
+    import Lumina.sphere_docker as SD
+
+    class KisOpenGLCanvas2(QWidget):        # named like Krita's canvas class
+        pass
+
+    win = QMainWindow()
+    central = QWidget()
+    QVBoxLayout(central).addWidget(KisOpenGLCanvas2())
+    win.setCentralWidget(central)
+    dock = QDockWidget("Text Properties")
+    in_dock = KisOpenGLCanvas2()
+    dock.setWidget(in_dock)
+    win.addDockWidget(1, dock)
+    watch = SD._CanvasPickFilter()
+    assert watch.watch(win) == 1                      # the central canvas
+    assert in_dock not in watch._watched              # the dock was not searched
+def test_migration_moves_only_values_still_at_an_old_default():
+    """Issue #57: settings saved before v6 move from an old default to the
+    current one; values the user chose stay exactly as they were; v6 settings
+    are left alone."""
+    from Lumina.sphere_docker import migrate_settings_defaults, SHININESS_REF
+    old = {"ambient": 10, "ground": 2, "sky": 5, "rim": 14, "spec_max": 24,
+           "specular": 3, "azimuth": 287, "elevation": 45}
+    new, changes = migrate_settings_defaults(old, 5)
+    assert new == {"ambient": 5, "ground": 1, "sky": 2, "rim": 10, "spec_max": 61,
+                   "specular": SHININESS_REF, "azimuth": 304, "elevation": 41}
+    assert {c[0] for c in changes} == set(old)
+    mine = {"ambient": 12, "ground": 3, "sky": 4, "rim": 20, "spec_max": 40,
+            "specular": 16, "azimuth": 287, "elevation": 30}
+    kept, changes = migrate_settings_defaults(mine, 5)
+    assert kept == mine and changes == []           # the light moves only as a pair
+    mixed = dict(mine, rim=14)
+    out, changes = migrate_settings_defaults(mixed, 5)
+    assert out == dict(mine, rim=10) and [c[0] for c in changes] == ["rim"]
+    assert migrate_settings_defaults(old, 6) == (old, [])
+    # the truncated 8.9 (saved as an int before v6) counts as the default
+    assert migrate_settings_defaults({"specular": 8}, 5)[0]["specular"] == SHININESS_REF
+
+
+@requires_qt
+def test_old_settings_file_migrates_once_and_keeps_custom_values(tmp_path, monkeypatch):
+    """A 2.6.0-style v5 file: untouched defaults load as today's, a value the
+    user set stays, the version is written as 6, and a second load changes
+    nothing. Shininess survives a restart exactly (it was saved as an int)."""
+    _app_or_skip()
+    from PyQt5.QtCore import QSettings
+    import Lumina.sphere_docker as SD
+    store = QSettings(str(tmp_path / "Lumina.ini"), QSettings.IniFormat)
+    for k, v in {"version": 5, "ambient": 10, "rim": 14, "sky": 5, "ground": 2,
+                 "spec_max": 24, "specular": 3, "azimuth": 287, "elevation": 45,
+                 "contrast": 130}.items():
+        store.setValue(k, v)
+    store.sync()
+    monkeypatch.setattr(SD, "_settings", lambda: store)
+    d = _switch_docker()
+    eng = d.processor.engine
+    assert round(eng.ambient * 100) == 5 and round(eng.rim_light * 100) == 10
+    assert round(eng.sky_bounce * 100) == 2 and round(eng.ground_bounce * 100) == 1
+    assert round(eng.spec_max * 100) == 61 and abs(eng.shininess - SD.SHININESS_REF) < 1e-6
+    assert (round(eng.light_azimuth), round(eng.light_elevation)) == (304, 41)
+    assert abs(eng.contrast - 1.30) < 1e-6           # the user's own value stays
+    d._save_settings()
+    assert int(store.value("version")) == 6
+    assert abs(float(store.value("specular")) - SD.SHININESS_REF) < 1e-6
+    # A user who moves Rim back to 14 on v6 keeps it.
+    store.setValue("rim", 14)
+    store.sync()
+    d2 = _switch_docker()
+    assert round(d2.processor.engine.rim_light * 100) == 14
+    assert abs(d2.processor.engine.shininess - SD.SHININESS_REF) < 1e-6
+
+
+@requires_qt
+def test_a_v5_file_written_by_2_7_is_not_migrated(tmp_path, monkeypatch):
+    """2.7.0 also saved v5, already with today's defaults. A Rim of 14 there
+    came from the Artistic preset, not the old default, and must stay (this
+    happened to the author: the migration moved it to 10)."""
+    _app_or_skip()
+    from PyQt5.QtCore import QSettings
+    import Lumina.sphere_docker as SD
+    store = QSettings(str(tmp_path / "Lumina.ini"), QSettings.IniFormat)
+    for k, v in {"version": 5, "rim": 14, "ambient": 6, "spec_max": 80, "specular": 12,
+                 "sticky": 40, "targets_profile": "sRGB-elle-V2-srgbtrc.icc",
+                 "highlight": "1.0000,0.9850,0.9700"}.items():
+        store.setValue(k, v)
+    store.sync()
+    monkeypatch.setattr(SD, "_settings", lambda: store)
+    d = _switch_docker()
+    eng = d.processor.engine
+    assert round(eng.rim_light * 100) == 14
+    assert round(eng.spec_max * 100) == 80 and abs(eng.shininess - 12) < 1e-6
+    d._save_settings()
+    assert int(store.value("version")) == 6
+
+
+@requires_qt
+def test_a_2_6_preset_migrates_whole_to_todays_preset(tmp_path, monkeypatch):
+    """The old presets share values with the old defaults (2.6.0's Gloss has
+    ground 2 and spec_max 24). A file holding one whole gets today's version
+    of that preset, not a per-value mix of old preset and new defaults."""
+    _app_or_skip()
+    from PyQt5.QtCore import QSettings
+    import Lumina.sphere_docker as SD
+    store = QSettings(str(tmp_path / "Lumina.ini"), QSettings.IniFormat)
+    store.setValue("version", 5)
+    for k, v in SD.V26_PRESETS["gloss"].items():
+        store.setValue(k, v)
+    store.sync()
+    monkeypatch.setattr(SD, "_settings", lambda: store)
+    d = _switch_docker()
+    eng = d.processor.engine
+    gloss = next(p for p in SD._PRESETS if p["key"] == "gloss")["values"]
+    assert round(eng.spec_max * 100) == gloss["spec_max"]
+    assert round(eng.rim_light * 100) == gloss["rim"]
+    assert abs(eng.shininess - gloss["specular"]) < 1e-6
+    assert SD.match_v26_preset(dict(SD.V26_PRESETS["gloss"], rim=17)) is None   # tweaked: not whole
