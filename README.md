@@ -16,7 +16,8 @@ looking at.
 
 Painted in Krita with its own brushes, every colour read off the Lumina sphere
 zone by zone. Lumina stays docked beside the canvas the whole time.
-**[Watch it with sound on YouTube](https://www.youtube.com/shorts/dRcQ4Hw5lpA).**
+**[Watch it with sound on YouTube](https://www.youtube.com/shorts/dRcQ4Hw5lpA)**, or read
+[how Lumina was built](https://vyechi.com/2026/10/11/krita-lighting-plugin-lumina/) on the author's blog.
 
 ![Lumina at work: a flat poster-style sunset beach, the lighting sets the plugin derived from it painted as a palette strip, and the panel on the right](images/Lumina_feature.png)
 
