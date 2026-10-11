@@ -12,10 +12,11 @@ cel-shaded bands, pick the smooth falloff; the three targets and the shading
 controls work either way, and the sphere shows you which one you are actually
 looking at.
 
-<p align="center"><img src="images/lumina_short.gif" width="400" alt="A beach still life painted in Krita with real brushes: every colour is picked off the Lumina sphere, which names each form zone (Light, Halftone, Terminator, Core shadow, Reflected light, Highlight), then laid in on a ball, a coconut, a crate and a bucket"></p>
+<p align="center"><a href="https://www.youtube.com/shorts/dRcQ4Hw5lpA"><img src="images/lumina_short.gif" width="400" alt="A beach still life painted in Krita with real brushes: every colour is picked off the Lumina sphere, which names each form zone (Light, Halftone, Terminator, Core shadow, Reflected light, Highlight), then laid in on a ball, a coconut, a crate and a bucket"></a></p>
 
 Painted in Krita with its own brushes, every colour read off the Lumina sphere
 zone by zone. Lumina stays docked beside the canvas the whole time.
+**[Watch it with sound on YouTube](https://www.youtube.com/shorts/dRcQ4Hw5lpA).**
 
 ![Lumina at work: a flat poster-style sunset beach, the lighting sets the plugin derived from it painted as a palette strip, and the panel on the right](images/Lumina_feature.png)
 
