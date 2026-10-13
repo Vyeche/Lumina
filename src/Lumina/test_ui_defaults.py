@@ -2431,23 +2431,33 @@ def test_a_2_6_preset_migrates_whole_to_todays_preset(tmp_path, monkeypatch):
 
 
 @requires_qt
-def test_canvas_changed_never_scans_canvases_mid_switch():
-    """Closing the last document crashed Krita: canvasChanged(None) arrives
-    while the outgoing canvas widget is being destroyed, and the canvas scan
-    installed an event filter on it. The scan must not run synchronously,
-    and must not run at all when there is no canvas."""
+def test_canvas_changed_never_touches_krita_mid_switch():
+    """Closing the last document crashed Krita twice over: canvasChanged
+    arrives while Krita is still tearing the document down, and both the
+    canvas scan (2.8.1) and reading the closing document's colour space
+    (2.8.2) touched freed objects. Nothing may read Krita synchronously; with
+    no canvas nothing may read it at all, the sampler poll included."""
     app = _app_or_skip()
     from Lumina.sphere_docker import SphereDocker
     d = SphereDocker()
     d._rebuild_timer = _NoopTimer()
-    scans = []
-    d._watch_canvas_picks = lambda: scans.append("scan")
+    touched = []
+    d._watch_canvas_picks = lambda: touched.append("scan")
+    d._current_krita_rgb = lambda: touched.append("read")
+    d._update_preview = lambda: None
 
-    d.canvasChanged(None)            # last document closed
+    d.canvasChanged(None)            # last document closing
     app.processEvents()
-    assert scans == [], "no canvas: nothing to watch, and no scan mid-teardown"
+    d._poll_sampler()                # a sampler tick during the teardown
+    assert touched == [], touched
 
     d.canvasChanged(object())        # a new view's canvas
-    assert scans == [], "the scan must wait until the view switch finishes"
+    assert touched == [], "nothing may happen until the switch finishes"
     app.processEvents()
-    assert scans == ["scan"], scans
+    assert "scan" in touched and "read" in touched, touched
+
+    touched.clear()
+    d.canvasChanged(object())
+    d.canvasChanged(None)            # closed again before the switch ran
+    app.processEvents()
+    assert touched == [], touched

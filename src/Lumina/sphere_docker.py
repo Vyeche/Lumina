@@ -124,7 +124,7 @@ SAVE_DEBOUNCE_MS = 2000
 # Plugin version, logged at startup with the loaded module path so stale or
 # half-reinstalled copies are visible in bug reports. Keep in sync with
 # src/Lumina.desktop (X-KDE-PluginInfo-Version); bump both per release.
-PLUGIN_VERSION = "2.8.1"
+PLUGIN_VERSION = "2.8.2"
 # Settings schema version. v1 stored Tone as brightness (bug); v2 stores Tone
 # as saturation. v3 persists spec_max. v4 migrates Diffuse/highlight-size
 # slider levels to the perceptual curves (old linear positions reinterpreted
@@ -1241,6 +1241,9 @@ class SphereDocker(DockWidget):
         self._base_level_hs = None
         self._sampler_timer = None
         self._sampler_baseline = None
+        # False while Krita has no canvas (no document, or the last one is
+        # closing): nothing may read Krita's document state then.
+        self._has_canvas = True
         # The colour space the target numbers are written in: the active
         # layer's, as in Krita's own selectors. See _sync_working_space.
         self._space_profile = SRGB_PROFILE
@@ -4262,17 +4265,26 @@ class SphereDocker(DockWidget):
         The real external-color listener is the View color-change signal wired below;
         this covers document/canvas switches where no change signal fires per pick.
         """
+        # Krita calls this in the middle of swapping views, and with None while
+        # it closes the last document. Until it has finished, the outgoing
+        # document is still Krita's active one, and touching it crashes Krita:
+        # reading its active layer's colour space segfaulted (2.8.2), and so
+        # did installing the pick filter on its dying canvas widget (2.8.1).
+        # So nothing here reads Krita. With no canvas there is nothing to
+        # read at all, and the sampler poll pauses; otherwise everything
+        # happens once the switch is done.
+        self._has_canvas = canvas is not None
+        if canvas is not None:
+            QTimer.singleShot(0, self._sync_after_canvas_change)
+
+    def _sync_after_canvas_change(self) -> None:
+        """canvasChanged's work, run after Krita has finished the switch."""
+        if not self._has_canvas:
+            return              # the canvas went away again in the meantime
         try:
             self._on_krita_color_changed()
-            # A new view has a new canvas widget to watch for picks -- but not
-            # now. Krita calls this in the middle of swapping views, and with
-            # None while closing the last document. Scanning the window then
-            # reaches the outgoing canvas widget while it is being destroyed,
-            # and installing a filter on it segfaults Krita (closing the last
-            # document crashed it every time). With no canvas there is nothing
-            # to watch; otherwise look once the switch has finished.
-            if canvas is not None:
-                QTimer.singleShot(0, self._watch_canvas_picks)
+            # A new view has a new canvas widget to watch for picks.
+            self._watch_canvas_picks()
             # A newly loaded document can bring a colour profile Krita did not
             # know before (an embedded Display P3), so the display conversion
             # of the targets may only work now: redraw the swatches and the
@@ -5294,6 +5306,8 @@ class SphereDocker(DockWidget):
         try:
             if self._sync_guard:
                 return          # this change is our own echo; ignore it
+            if not self._has_canvas:
+                return          # no document, or the last one is closing
             t0 = time.monotonic()
             cur = self._current_krita_rgb()
             read_ms = (time.monotonic() - t0) * 1000.0
