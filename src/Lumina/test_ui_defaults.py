@@ -2428,3 +2428,26 @@ def test_a_2_6_preset_migrates_whole_to_todays_preset(tmp_path, monkeypatch):
     assert round(eng.rim_light * 100) == gloss["rim"]
     assert abs(eng.shininess - gloss["specular"]) < 1e-6
     assert SD.match_v26_preset(dict(SD.V26_PRESETS["gloss"], rim=17)) is None   # tweaked: not whole
+
+
+@requires_qt
+def test_canvas_changed_never_scans_canvases_mid_switch():
+    """Closing the last document crashed Krita: canvasChanged(None) arrives
+    while the outgoing canvas widget is being destroyed, and the canvas scan
+    installed an event filter on it. The scan must not run synchronously,
+    and must not run at all when there is no canvas."""
+    app = _app_or_skip()
+    from Lumina.sphere_docker import SphereDocker
+    d = SphereDocker()
+    d._rebuild_timer = _NoopTimer()
+    scans = []
+    d._watch_canvas_picks = lambda: scans.append("scan")
+
+    d.canvasChanged(None)            # last document closed
+    app.processEvents()
+    assert scans == [], "no canvas: nothing to watch, and no scan mid-teardown"
+
+    d.canvasChanged(object())        # a new view's canvas
+    assert scans == [], "the scan must wait until the view switch finishes"
+    app.processEvents()
+    assert scans == ["scan"], scans

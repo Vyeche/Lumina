@@ -124,7 +124,7 @@ SAVE_DEBOUNCE_MS = 2000
 # Plugin version, logged at startup with the loaded module path so stale or
 # half-reinstalled copies are visible in bug reports. Keep in sync with
 # src/Lumina.desktop (X-KDE-PluginInfo-Version); bump both per release.
-PLUGIN_VERSION = "2.8.0"
+PLUGIN_VERSION = "2.8.1"
 # Settings schema version. v1 stored Tone as brightness (bug); v2 stores Tone
 # as saturation. v3 persists spec_max. v4 migrates Diffuse/highlight-size
 # slider levels to the perceptual curves (old linear positions reinterpreted
@@ -4264,8 +4264,15 @@ class SphereDocker(DockWidget):
         """
         try:
             self._on_krita_color_changed()
-            # A new view has a new canvas widget to watch for picks.
-            self._watch_canvas_picks()
+            # A new view has a new canvas widget to watch for picks -- but not
+            # now. Krita calls this in the middle of swapping views, and with
+            # None while closing the last document. Scanning the window then
+            # reaches the outgoing canvas widget while it is being destroyed,
+            # and installing a filter on it segfaults Krita (closing the last
+            # document crashed it every time). With no canvas there is nothing
+            # to watch; otherwise look once the switch has finished.
+            if canvas is not None:
+                QTimer.singleShot(0, self._watch_canvas_picks)
             # A newly loaded document can bring a colour profile Krita did not
             # know before (an embedded Display P3), so the display conversion
             # of the targets may only work now: redraw the swatches and the
